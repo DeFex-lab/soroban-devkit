@@ -1,0 +1,1 @@
+feat(encode): accept `json:` composite values via existing JSON- converter (#259)
