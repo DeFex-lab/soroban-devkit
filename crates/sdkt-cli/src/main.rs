@@ -2,20 +2,19 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use sdkt_core::fee::{FeeConfig, FeeEstimator, LedgerFeeSample, NetworkKind};
 use sdkt_core::fetch::DependencyFetcher;
-use sdkt_core::{
-    DevKitConfig, NetworkConfig, OutputFormat, MAINNET_PASSPHRASE, TESTNET_PASSPHRASE,
-};
+use sdkt_core::{DevKitConfig, OutputFormat};
 use sdkt_rpc::inspect::StorageSummary;
 use sdkt_rpc::wasm::get_wasm_bytecode;
 use sdkt_rpc::{
-    estimate_dynamic_fee, extend_footprint, get_contract_events, get_next_sequence, get_ttl_info,
-    get_wasm_metadata, inspect_account, inspect_contract, inspect_transaction, read_contract_state,
-    restore_footprint, simulate_transaction, SorobanRpcClient, StorageKeyInfo, TtlInfoSummary,
+    estimate_dynamic_fee, extend_footprint, first_topic_filter, get_contract_events_filtered,
+    get_next_sequence, get_ttl_info, get_wasm_metadata, inspect_account, inspect_contract,
+    inspect_transaction, read_contract_state, restore_footprint, simulate_transaction,
+    SorobanRpcClient, StorageKeyInfo, TtlInfoSummary,
 };
 use sdkt_storage::WasmCache;
 use sdkt_storage::{
     capture_snapshot, diff_snapshots, NetworkProfile, NetworkStore, SnapshotDiff, StorageAnalyzer,
-    StorageSnapshot,
+    StorageSnapshot, DEFAULT_SUGGESTED_LEDGERS, EXPIRING_SOON_LEDGERS,
 };
 use sdkt_wasm::spec::parse_contract_spec;
 use sdkt_xdr::abi_decode::decode_event_topics;
@@ -29,6 +28,13 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process;
+
+use commands::network::{
+    network_is_explicit, resolve_network_config, resolve_rpc_client, resolve_rpc_client_mutating,
+    resolve_target_network, NetworkAction,
+};
+
+mod commands;
 
 /// Version string used by `sdkt --version` / `sdkt --long-version` ().
 ///
@@ -65,354 +71,60 @@ fn sdkt_version_string() -> &'static str {
     }
 }
 
+#[cfg(test)]
+mod storage_label_tests {
+    use super::*;
+
+    #[test]
+    fn projects_matching_union_key_and_falls_back_for_unknown_key() {
+        let spec: sdkt_wasm::ContractSpec = serde_json::from_value(serde_json::json!({
+            "env_meta": null, "functions": [], "events": [],
+            "custom_types": [{
+                "name": "DataKey", "kind": "union", "doc": "", "type_args": [],
+                "bytes_n": null,
+                "members": [{"name": "Balance", "doc": "", "types": [{
+                    "name": "u32", "kind": "primitive", "doc": "", "members": [],
+                    "type_args": [], "bytes_n": null
+                }], "value": null}]
+            }]
+        }))
+        .unwrap();
+        let contract = "CAE3U7JKESRWZHPEQ72DVNGOQ6WPA7HSPQZL5YV46NPCE4TMUPAGYMEC";
+        let key = resolve_storage_read_key(
+            contract,
+            None,
+            Some("Balance"),
+            &["u32:7".to_string()],
+            false,
+            "persistent",
+        )
+        .unwrap();
+        assert_eq!(storage_key_label(&key, &spec), "DataKey::Balance(u32)");
+        let unknown =
+            resolve_storage_read_key(contract, None, Some("Unknown"), &[], false, "persistent")
+                .unwrap();
+        assert_eq!(storage_key_label(&unknown, &spec), unknown);
+    }
+}
+
 /// Reusable network-resolution flags shared by every command that talks to a
 /// Soroban/Stellar RPC endpoint.
 ///
 /// Flattened into those commands via `#[command(flatten)]` so the resolution
 /// semantics stay identical everywhere (no copy/paste).
 #[derive(Args, Clone, Debug, Default)]
-struct NetworkArgs {
+pub(crate) struct NetworkArgs {
     /// Use a saved network profile (see `sdkt network add`) for the RPC URL and
     /// network passphrase. Overrides .sdkt.toml defaults.
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", global = true)]
     network_profile: Option<String>,
     /// Explicit RPC endpoint URL. Overrides any profile and .sdkt.toml value.
-    #[arg(long, value_name = "URL")]
+    #[arg(long, value_name = "URL", global = true)]
     rpc_url: Option<String>,
     /// Explicit network passphrase. Overrides any profile and .sdkt.toml value.
-    #[arg(long, value_name = "PASSPHRASE")]
+    #[arg(long, value_name = "PASSPHRASE", global = true)]
     network_passphrase: Option<String>,
 }
-/// Apply resolution precedence onto a base [`NetworkConfig`].
-///
-/// Pure function (no I/O, no network) — this is the single source of truth for
-/// precedence and is unit-tested directly.
-///
-/// Priority (highest wins):
-/// 1. explicit `rpc_url` / `network_passphrase`,
-/// 2. a resolved `profile` (loaded from `--network-profile`),
-/// 3. the `base` config (`.sdkt.toml`, then `NetworkConfig::default()`).
-fn apply_profile_overrides(
-    base: NetworkConfig,
-    profile: Option<NetworkProfile>,
-    rpc_url: Option<String>,
-    network_passphrase: Option<String>,
-) -> NetworkConfig {
-    let mut cfg = base;
-
-    if let Some(p) = profile {
-        cfg.rpc_url = p.rpc_url;
-        cfg.passphrase = p.network_passphrase;
-    }
-
-    if let Some(url) = rpc_url {
-        cfg.rpc_url = url;
-    }
-    if let Some(p) = network_passphrase {
-        cfg.passphrase = p;
-    }
-
-    cfg
-}
-
-/// Resolve the effective [`NetworkConfig`] from explicit CLI overrides, an
-/// optional named profile, and built-in defaults.
-///
-/// Resolution priority (highest wins):
-/// 1. explicit `--rpc-url` / `--network-passphrase` CLI flags,
-/// 2. `--network-profile <NAME>` (loaded from `sdkt_storage::NetworkStore`),
-/// 3. built-in defaults: `.sdkt.toml` `[network]`, then `NetworkConfig::default()`.
-///
-/// Explicit flags always override values loaded from a profile, and a profile
-/// always overrides the built-in defaults.
-fn resolve_network_config(
-    rpc_url: Option<String>,
-    network_passphrase: Option<String>,
-    network_profile: Option<String>,
-) -> Result<NetworkConfig, String> {
-    let base = DevKitConfig::from_file(".sdkt.toml")
-        .ok()
-        .map(|c| c.network)
-        .unwrap_or_default();
-
-    let profile = if let Some(name) = network_profile {
-        let store = NetworkStore::new().map_err(|e| format!("cannot open network store: {}", e))?;
-        let profile = store
-            .get(&name)
-            .map_err(|e| format!("network profile '{}' not found: {}", name, e))?;
-        Some(profile)
-    } else {
-        None
-    };
-
-    Ok(apply_profile_overrides(
-        base,
-        profile,
-        rpc_url,
-        network_passphrase,
-    ))
-}
-
-/// Build a [`SorobanRpcClient`] from the resolved network configuration,
-/// exiting with a clear error message if resolution fails.
-fn resolve_rpc_client(
-    rpc_url: Option<String>,
-    network_passphrase: Option<String>,
-    network_profile: Option<String>,
-) -> SorobanRpcClient {
-    match resolve_network_config(rpc_url, network_passphrase, network_profile) {
-        Ok(cfg) => SorobanRpcClient::from_config(&cfg),
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            process::exit(1);
-        }
-    }
-}
-
-/// Target network resolution result for RPC commands that accept `--network`.
-struct TargetNetwork {
-    pub client: SorobanRpcClient,
-    #[allow(dead_code)]
-    pub config: NetworkConfig,
-    pub network_name: String,
-}
-
-impl std::fmt::Debug for TargetNetwork {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TargetNetwork")
-            .field("config", &self.config)
-            .field("network_name", &self.network_name)
-            .finish()
-    }
-}
-
-/// Resolve the RPC client and canonical network name for commands that accept `--network`.
-///
-/// When `--network` is explicitly provided (`testnet`, `mainnet`, `futurenet`), it
-/// configures the well-known endpoint/passphrase and conflicts with `--rpc-url`,
-/// `--network-profile`, and `--network-passphrase`. When omitted, the network is resolved
-/// from `NetworkArgs` (profile, rpc-url, or defaults), and the canonical name is derived
-/// from the profile or passphrase.
-fn resolve_target_network(
-    network: Option<&str>,
-    net: &NetworkArgs,
-) -> Result<TargetNetwork, String> {
-    if let Some(explicit_net) = network {
-        let explicit_net = explicit_net.trim();
-        if !explicit_net.is_empty() {
-            if net.rpc_url.is_some()
-                || net.network_profile.is_some()
-                || net.network_passphrase.is_some()
-            {
-                return Err("--network conflicts with --rpc-url, --network-passphrase, and --network-profile".to_string());
-            }
-
-            let (rpc_url, passphrase, canonical_name) =
-                match explicit_net.to_ascii_lowercase().as_str() {
-                    "testnet" => (
-                        "https://soroban-testnet.stellar.org",
-                        TESTNET_PASSPHRASE,
-                        "testnet",
-                    ),
-                    "mainnet" => (
-                        "https://soroban-rpc.stellar.org",
-                        MAINNET_PASSPHRASE,
-                        "mainnet",
-                    ),
-                    "futurenet" => (
-                        "https://rpc-futurenet.stellar.org",
-                        "Test SDF Future Network ; October 2022",
-                        "futurenet",
-                    ),
-                    other => {
-                        return Err(format!(
-                            "invalid network '{}' (expected testnet|mainnet|futurenet)",
-                            other
-                        ));
-                    }
-                };
-
-            let cfg = NetworkConfig {
-                rpc_url: rpc_url.to_string(),
-                passphrase: passphrase.to_string(),
-                timeout_secs: Some(15),
-                pool_max_idle_per_host: Some(100),
-            };
-            return Ok(TargetNetwork {
-                client: SorobanRpcClient::from_config(&cfg),
-                config: cfg,
-                network_name: canonical_name.to_string(),
-            });
-        }
-    }
-
-    let cfg = resolve_network_config(
-        net.rpc_url.clone(),
-        net.network_passphrase.clone(),
-        net.network_profile.clone(),
-    )?;
-
-    let network_name = if let Some(ref profile) = net.network_profile {
-        profile.clone()
-    } else if cfg.passphrase == MAINNET_PASSPHRASE || is_mainnet_rpc_url(&cfg.rpc_url) {
-        "mainnet".to_string()
-    } else if cfg.passphrase == "Test SDF Future Network ; October 2022"
-        || is_futurenet_rpc_url(&cfg.rpc_url)
-    {
-        "futurenet".to_string()
-    } else if cfg.passphrase == TESTNET_PASSPHRASE || is_testnet_rpc_url(&cfg.rpc_url) {
-        "testnet".to_string()
-    } else {
-        "custom".to_string()
-    };
-
-    Ok(TargetNetwork {
-        client: SorobanRpcClient::from_config(&cfg),
-        config: cfg,
-        network_name,
-    })
-}
-
-fn is_mainnet_rpc_url(rpc_url: &str) -> bool {
-    let url = rpc_url.to_ascii_lowercase();
-    url.contains("stellar.org") && !url.contains("testnet") && !url.contains("futurenet")
-}
-
-fn is_futurenet_rpc_url(rpc_url: &str) -> bool {
-    let url = rpc_url.to_ascii_lowercase();
-    url.contains("futurenet")
-}
-
-fn is_testnet_rpc_url(rpc_url: &str) -> bool {
-    let url = rpc_url.to_ascii_lowercase();
-    url.contains("testnet")
-}
-
-/// Whether the operator explicitly named the target network (via `--rpc-url`,
-/// `--network-passphrase`, or `--network-profile`). When this is `false` the
-/// resolved [`NetworkConfig`] came entirely from built-in defaults (testnet),
-/// and mutating operations must therefore refuse mainnet.
-fn network_is_explicit(
-    rpc_url: &Option<String>,
-    network_passphrase: &Option<String>,
-    network_profile: &Option<String>,
-) -> bool {
-    rpc_url.is_some() || network_passphrase.is_some() || network_profile.is_some()
-}
-
-/// Build a [`SorobanRpcClient`] for a *mutating* (state-changing) RPC operation.
-///
-/// This reuses the existing resolution path and then applies the conservative
-/// mainnet-safety guard from `sdkt_core::guard_mutating_network`. A mutating
-/// command is only allowed to touch mainnet when the operator has explicitly
-/// selected the network; an implicit testnet default combined with a mainnet
-/// endpoint/passphrase is rejected before any request leaves the process.
-///
-/// Resolution or guard failures print a clear message and exit non-zero.
-fn resolve_rpc_client_mutating(
-    rpc_url: Option<String>,
-    network_passphrase: Option<String>,
-    network_profile: Option<String>,
-) -> SorobanRpcClient {
-    let explicit = network_is_explicit(&rpc_url, &network_passphrase, &network_profile);
-    let cfg = match resolve_network_config(
-        rpc_url.clone(),
-        network_passphrase.clone(),
-        network_profile.clone(),
-    ) {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            process::exit(1);
-        }
-    };
-    if let Err(e) = sdkt_core::guard_mutating_network(&cfg, explicit) {
-        eprintln!("Error: {}", e);
-        process::exit(1);
-    }
-    SorobanRpcClient::from_config(&cfg)
-}
-
-/// Outcome of an `sdkt network check <profile>` reachability probe.
-///
-/// Serializes to the structured JSON schema used by `--format json`:
-/// `profile`, `rpc_url`, `reachable`, `status`, `latest_ledger`,
-/// `protocol_version`, `error`. `error` is `None` (serialized as `null`) only
-/// when the endpoint is reachable *and* healthy.
-#[derive(Debug, serde::Serialize)]
-struct NetworkCheckOutcome {
-    profile: String,
-    rpc_url: String,
-    reachable: bool,
-    status: Option<String>,
-    latest_ledger: Option<u32>,
-    protocol_version: Option<u32>,
-    error: Option<String>,
-}
-
-impl NetworkCheckOutcome {
-    /// A profile is healthy only when the RPC endpoint answered a ledger
-    /// query *and* the subsequent health check reported `healthy`.
-    fn is_healthy(&self) -> bool {
-        self.reachable && self.error.is_none()
-    }
-}
-
-/// Probe a resolved network endpoint for reachability without mutating any
-/// stored profile.
-///
-/// `get_ledger()` is issued first because it exercises real connectivity
-/// (transport/HTTP + JSON-RPC) and returns the latest ledger sequence and
-/// protocol version. `get_health()` then reports the node's health string.
-/// A transport/connection failure on the ledger call means the endpoint is
-/// unreachable; a healthy ledger response followed by a failed or non-healthy
-/// health call means the endpoint is reachable but not usable.
-async fn probe_network_profile(profile: &str, cfg: &NetworkConfig) -> NetworkCheckOutcome {
-    let client = SorobanRpcClient::from_config(cfg);
-    let rpc_url = cfg.rpc_url.clone();
-
-    let mut outcome = NetworkCheckOutcome {
-        profile: profile.to_string(),
-        rpc_url: rpc_url.clone(),
-        reachable: false,
-        status: None,
-        latest_ledger: None,
-        protocol_version: None,
-        error: None,
-    };
-
-    match client.get_ledger().await {
-        Ok(ledger) => {
-            outcome.reachable = true;
-            outcome.latest_ledger = Some(ledger.sequence);
-            outcome.protocol_version = Some(ledger.protocol_version);
-
-            match client.get_health().await {
-                Ok(health) => {
-                    outcome.status = Some(health.status.clone());
-                    if !health.status.eq_ignore_ascii_case("healthy") {
-                        outcome.error = Some(format!(
-                            "RPC endpoint '{}' is reachable but reported health status '{}'",
-                            rpc_url, health.status
-                        ));
-                    }
-                }
-                Err(e) => {
-                    outcome.error = Some(format!(
-                        "RPC endpoint '{}' is reachable but the health check failed: {}",
-                        rpc_url, e
-                    ));
-                }
-            }
-        }
-        Err(e) => {
-            outcome.error = Some(format!("RPC endpoint '{}' is unreachable: {}", rpc_url, e));
-        }
-    }
-
-    outcome
-}
-
 /// Adapter that makes a closed consumer (EPIPE / `BrokenPipe`) look like a
 /// successful write.
 ///
@@ -438,186 +150,6 @@ impl<W: Write> Write for BrokenPipeOk<W> {
             Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
             other => other,
         }
-    }
-}
-
-#[cfg(test)]
-mod resolver_tests {
-    use super::*;
-
-    fn base_testnet() -> NetworkConfig {
-        NetworkConfig {
-            rpc_url: "https://soroban-testnet.stellar.org".to_string(),
-            passphrase: "Test SDF Network ; September 2015".to_string(),
-            timeout_secs: Some(15),
-            pool_max_idle_per_host: Some(100),
-        }
-    }
-
-    fn profile(name: &str, url: &str, pass: &str) -> NetworkProfile {
-        NetworkProfile::new(name, url, pass)
-    }
-
-    #[test]
-    fn built_in_default_when_nothing_set() {
-        let cfg = apply_profile_overrides(base_testnet(), None, None, None);
-        assert_eq!(cfg.rpc_url, "https://soroban-testnet.stellar.org");
-        assert_eq!(cfg.passphrase, "Test SDF Network ; September 2015");
-    }
-
-    #[test]
-    fn profile_overrides_built_in_default() {
-        let p = profile("local", "http://127.0.0.1:8000", "Standalone");
-        let cfg = apply_profile_overrides(base_testnet(), Some(p), None, None);
-        assert_eq!(cfg.rpc_url, "http://127.0.0.1:8000");
-        assert_eq!(cfg.passphrase, "Standalone");
-    }
-
-    #[test]
-    fn rpc_url_flag_overrides_profile() {
-        let p = profile("local", "http://127.0.0.1:8000", "Standalone");
-        let cfg = apply_profile_overrides(
-            base_testnet(),
-            Some(p),
-            Some("http://override.example".to_string()),
-            None,
-        );
-        assert_eq!(cfg.rpc_url, "http://override.example");
-        // passphrase comes from the profile when no passphrase flag is given
-        assert_eq!(cfg.passphrase, "Standalone");
-    }
-
-    #[test]
-    fn passphrase_flag_overrides_profile() {
-        let p = profile("local", "http://127.0.0.1:8000", "Standalone");
-        let cfg = apply_profile_overrides(
-            base_testnet(),
-            Some(p),
-            None,
-            Some("Override Passphrase".to_string()),
-        );
-        assert_eq!(cfg.rpc_url, "http://127.0.0.1:8000");
-        assert_eq!(cfg.passphrase, "Override Passphrase");
-    }
-
-    #[test]
-    fn explicit_flags_win_over_profile_both() {
-        let p = profile("local", "http://127.0.0.1:8000", "Standalone");
-        let cfg = apply_profile_overrides(
-            base_testnet(),
-            Some(p),
-            Some("http://rpc.example".to_string()),
-            Some("RPC Passphrase".to_string()),
-        );
-        assert_eq!(cfg.rpc_url, "http://rpc.example");
-        assert_eq!(cfg.passphrase, "RPC Passphrase");
-    }
-
-    #[test]
-    fn rpc_url_flag_without_profile_overrides_built_in() {
-        let cfg = apply_profile_overrides(
-            base_testnet(),
-            None,
-            Some("http://flag.example".to_string()),
-            None,
-        );
-        assert_eq!(cfg.rpc_url, "http://flag.example");
-        assert_eq!(cfg.passphrase, "Test SDF Network ; September 2015");
-    }
-
-    #[test]
-    fn resolve_target_network_explicit_builtins() {
-        let net = NetworkArgs::default();
-
-        // testnet
-        let target = resolve_target_network(Some("testnet"), &net).unwrap();
-        assert_eq!(target.network_name, "testnet");
-        assert_eq!(target.config.rpc_url, "https://soroban-testnet.stellar.org");
-        assert_eq!(target.config.passphrase, TESTNET_PASSPHRASE);
-
-        // mainnet
-        let target = resolve_target_network(Some("mainnet"), &net).unwrap();
-        assert_eq!(target.network_name, "mainnet");
-        assert_eq!(target.config.rpc_url, "https://soroban-rpc.stellar.org");
-        assert_eq!(target.config.passphrase, MAINNET_PASSPHRASE);
-
-        // futurenet
-        let target = resolve_target_network(Some("futurenet"), &net).unwrap();
-        assert_eq!(target.network_name, "futurenet");
-        assert_eq!(target.config.rpc_url, "https://rpc-futurenet.stellar.org");
-        assert_eq!(
-            target.config.passphrase,
-            "Test SDF Future Network ; October 2022"
-        );
-
-        // case insensitivity
-        let target = resolve_target_network(Some("MainNet"), &net).unwrap();
-        assert_eq!(target.network_name, "mainnet");
-    }
-
-    #[test]
-    fn resolve_target_network_invalid_network_error() {
-        let net = NetworkArgs::default();
-        let err = resolve_target_network(Some("unknown_net"), &net).unwrap_err();
-        assert!(err.contains("invalid network 'unknown_net'"));
-        assert!(err.contains("expected testnet|mainnet|futurenet"));
-    }
-
-    #[test]
-    fn resolve_target_network_conflicts() {
-        let net_rpc = NetworkArgs {
-            rpc_url: Some("http://custom.rpc".to_string()),
-            ..Default::default()
-        };
-        let err = resolve_target_network(Some("mainnet"), &net_rpc).unwrap_err();
-        assert_eq!(
-            err,
-            "--network conflicts with --rpc-url, --network-passphrase, and --network-profile"
-        );
-
-        let net_profile = NetworkArgs {
-            network_profile: Some("test-profile".to_string()),
-            ..Default::default()
-        };
-        let err = resolve_target_network(Some("testnet"), &net_profile).unwrap_err();
-        assert_eq!(
-            err,
-            "--network conflicts with --rpc-url, --network-passphrase, and --network-profile"
-        );
-
-        let net_pass = NetworkArgs {
-            network_passphrase: Some("Custom Passphrase".to_string()),
-            ..Default::default()
-        };
-        let err = resolve_target_network(Some("futurenet"), &net_pass).unwrap_err();
-        assert_eq!(
-            err,
-            "--network conflicts with --rpc-url, --network-passphrase, and --network-profile"
-        );
-    }
-
-    #[test]
-    fn resolve_target_network_none_falls_back_to_network_args() {
-        let net_default = NetworkArgs::default();
-        let target = resolve_target_network(None, &net_default).unwrap();
-        assert_eq!(target.network_name, "testnet");
-        assert_eq!(target.config.rpc_url, "https://soroban-testnet.stellar.org");
-
-        let net_mainnet_rpc = NetworkArgs {
-            rpc_url: Some("https://soroban-rpc.stellar.org".to_string()),
-            ..Default::default()
-        };
-        let target = resolve_target_network(None, &net_mainnet_rpc).unwrap();
-        assert_eq!(target.network_name, "mainnet");
-
-        let net_custom = NetworkArgs {
-            rpc_url: Some("http://127.0.0.1:8000".to_string()),
-            network_passphrase: Some("Standalone Network".to_string()),
-            ..Default::default()
-        };
-        let target = resolve_target_network(None, &net_custom).unwrap();
-        assert_eq!(target.network_name, "custom");
-        assert_eq!(target.config.rpc_url, "http://127.0.0.1:8000");
     }
 }
 
@@ -651,6 +183,11 @@ enum Commands {
     Encode {
         /// One typed value: u32, i32, u64, i64, u128, i128, bool, string, symbol, bytes, or address.
         /// Examples: u128:1000000 i128:-1000 bytes:deadbeef
+        ///
+        /// Or json:<JSON> to encode ONE composite value (json:[1,2,3] is a single Vec):
+        /// array -> Vec, object -> Map with String keys, null -> Void, bool -> Bool,
+        /// string -> String, integer -> smallest of u32/u64 (or i32/i64 if negative).
+        /// Floats are rejected. Example: json:'[{"alice":"100"},{"bob":"250"}]'
         #[arg(value_name = "TYPE:VALUE", num_args = 1..)]
         values: Vec<String>,
     },
@@ -762,6 +299,10 @@ enum Commands {
         /// decoding. Mutually exclusive with `--abi`.
         #[arg(long, value_name = "CONTRACT_ID")]
         abi_contract: Option<String>,
+        /// Only return events whose first topic (the event name) is this
+        /// symbol. Case-sensitive; filtered server-side by the RPC.
+        #[arg(long, value_name = "SYMBOL")]
+        topic: Option<String>,
         #[command(flatten)]
         net: NetworkArgs,
     },
@@ -803,9 +344,9 @@ enum Commands {
     },
     /// Static security analysis of a Soroban contract source file (Gap C)
     Audit {
-        /// Path to the Rust source file (.rs) to analyze
-        #[arg(required_unless_present = "list_rules")]
-        path: Option<String>,
+        /// Rust source file(s) or directory path(s) to analyze
+        #[arg(required_unless_present = "list_rules", num_args = 1..)]
+        paths: Vec<String>,
         #[arg(short, long, default_value = "pretty")]
         format: String,
         /// List available audit rules and exit
@@ -849,8 +390,15 @@ enum Commands {
     },
     /// Deploy a contract (Upload WASM + Instantiate)
     Deploy {
+        /// Path to the WASM binary to upload and deploy. Mutually exclusive with
+        /// `--wasm-hash`.
         #[arg(short, long)]
-        wasm: String,
+        wasm: Option<String>,
+        /// Create-only: deploy from already-uploaded code identified by its
+        /// 64-char hex WASM hash, skipping the upload step (resume a deploy whose
+        /// upload succeeded but create failed). Mutually exclusive with `--wasm`.
+        #[arg(long, value_name = "HASH")]
+        wasm_hash: Option<String>,
         /// Deployment salt (40 hex chars = 20 bytes). Auto-generated if omitted.
         #[arg(short, long)]
         salt: Option<String>,
@@ -1003,6 +551,8 @@ enum IdentityAction {
     },
     Import {
         name: String,
+        /// Secret key, or `-` to read it from stdin (keeps the secret out of
+        /// the process argv / `ps` output — the path CI smoke jobs need).
         secret: String,
     },
     List,
@@ -1128,60 +678,6 @@ enum PluginAction {
 }
 
 #[derive(Subcommand)]
-enum NetworkAction {
-    /// Add or update a named network profile
-    Add {
-        /// Profile name (referenced by other commands)
-        name: String,
-        /// RPC endpoint URL (e.g. https://soroban-testnet.stellar.org)
-        #[arg(short, long, value_name = "URL")]
-        rpc_url: String,
-        /// Network passphrase (e.g. "Test SDF Network ; September 2015")
-        #[arg(short, long, value_name = "PASSPHRASE")]
-        passphrase: String,
-        /// Optional friendbot URL for test networks
-        #[arg(long, value_name = "URL")]
-        friendbot: Option<String>,
-        /// Optional human-readable description
-        #[arg(short, long)]
-        description: Option<String>,
-        /// Output format (pretty or json)
-        #[arg(short, long, default_value = "pretty")]
-        format: String,
-    },
-    /// List all saved network profiles
-    List {
-        /// Output format (pretty or json)
-        #[arg(short, long, default_value = "pretty")]
-        format: String,
-    },
-    /// Show a single network profile by name
-    Show {
-        /// Profile name
-        name: String,
-        /// Output format (pretty or json)
-        #[arg(short, long, default_value = "pretty")]
-        format: String,
-    },
-    /// Remove a network profile by name
-    Remove {
-        /// Profile name
-        name: String,
-        /// Output format (pretty or json)
-        #[arg(short, long, default_value = "pretty")]
-        format: String,
-    },
-    /// Check that a saved profile's RPC endpoint is reachable
-    Check {
-        /// Profile name
-        name: String,
-        /// Output format (pretty or json)
-        #[arg(short, long, default_value = "pretty")]
-        format: String,
-    },
-}
-
-#[derive(Subcommand)]
 enum WasmAction {
     /// Inspect a local WASM contract file offline
     Inspect {
@@ -1273,6 +769,17 @@ enum TxAction {
         #[arg(short, long, default_value = "pretty")]
         format: String,
     },
+    /// Show a transaction envelope in human-readable form (offline)
+    ///
+    /// Renders source, sequence, fee, memo, each operation (contract calls
+    /// with decoded arguments), the Soroban footprint and attached signatures,
+    /// so an envelope can be reviewed before `tx sign` or `tx submit`.
+    Decode {
+        /// Base64 XDR transaction envelope or path to a file containing it
+        envelope: String,
+        #[arg(short, long, default_value = "pretty")]
+        format: String,
+    },
     /// Simulate a transaction envelope without submitting it
     Simulate {
         /// Base64 XDR transaction envelope or path to a file containing it
@@ -1337,6 +844,14 @@ enum TxAction {
         /// Optional file path to write the output envelope XDR
         #[arg(short, long)]
         output: Option<String>,
+        /// Attach a text memo (up to 28 bytes) to the built transaction.
+        /// Mutually exclusive with `--memo-id`.
+        #[arg(long, value_name = "TEXT")]
+        memo_text: Option<String>,
+        /// Attach a numeric ID memo to the built transaction.
+        /// Mutually exclusive with `--memo-text`.
+        #[arg(long, value_name = "ID")]
+        memo_id: Option<u64>,
     },
     /// Sign a transaction envelope using a local identity ( / PR2)
     Sign {
@@ -1360,6 +875,11 @@ enum TxAction {
 
 #[derive(Subcommand)]
 enum ProjectCommand {
+    /// Show deployments recorded for the selected network profile.
+    Status {
+        #[arg(short, long, default_value = "pretty")]
+        format: String,
+    },
     /// Deploy all contracts defined in the workspace. Every deployed contract
     /// is persisted to `.sdkt-deployments.json` (per network profile) so a
     /// failure mid-graph never loses the contracts that already landed.
@@ -1488,6 +1008,7 @@ enum StorageAction {
     },
     /// Analyze a contract's storage layout (Instance/Persistent/Temporary
     /// categorization, TTL summary, and per-entry detail).
+    #[command(alias = "snapshot")]
     Analyze {
         contract_id: String,
         /// Repeatable: extra ledger keys (base64 XDR or hex XDR) to include in
@@ -1635,6 +1156,35 @@ enum StorageAction {
             default_value = "persistent"
         )]
         durability: String,
+        #[arg(short, long, default_value = "pretty")]
+        format: String,
+    },
+    /// Diff two storage snapshots and, optionally, derive a TTL extension plan.
+    ///
+    /// `--old` and `--new` each point to a JSON file that is the output of
+    /// `sdkt storage analyze --format json` (a serialised `StorageReport`).
+    ///
+    /// Without `--extend-plan` the command prints the diff entries only.
+    ///
+    /// With `--extend-plan` the command additionally prints the remediation
+    /// plan: the contract ID, the ledger keys covering the removed/expiring
+    /// entries, and a suggested `--ledgers` value.  Nothing is signed or
+    /// submitted.
+    ///
+    /// Exit codes: 0 in all non-error cases (including an empty plan).
+    #[command(name = "storage-diff", alias = "diff")]
+    StorageDiff {
+        /// Path to the OLD (baseline) storage snapshot JSON file.
+        #[arg(long, value_name = "FILE")]
+        old: String,
+        /// Path to the NEW (current) storage snapshot JSON file.
+        #[arg(long, value_name = "FILE")]
+        new: String,
+        /// Derive and print a TTL extension plan from the diff.
+        /// Prints the contract, ledger keys, and suggested --ledgers value.
+        /// No transaction is built, signed, or submitted.
+        #[arg(long, default_value_t = false)]
+        extend_plan: bool,
         #[arg(short, long, default_value = "pretty")]
         format: String,
     },
@@ -1934,6 +1484,59 @@ fn parse_salt_hex(s: &str) -> Result<[u8; 20], String> {
     Ok(out)
 }
 
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Warning for `sdkt events --topic` when `symbol` will not match the event's
+/// `topic[0]` on the wire. For a `#[contractevent]` that is its first prefix
+/// topic (the snake_case event name by default), not the declared event name,
+/// so querying by the name (`Transfer`) silently matches nothing when the
+/// prefix differs (`transfer`). Events without prefix topics fall back to their
+/// name. Returns `None` when the symbol is a wire topic of some declared event.
+fn unknown_event_topic_warning(spec: &sdkt_wasm::ContractSpec, symbol: &str) -> Option<String> {
+    // (declared name, topic[0] on the wire) per event.
+    let events: Vec<(&str, &str)> = spec
+        .events
+        .iter()
+        .map(|ev| {
+            let wire = ev.prefix_topics.first().unwrap_or(&ev.name);
+            (ev.name.as_str(), wire.as_str())
+        })
+        .collect();
+    if events.iter().any(|(_, wire)| *wire == symbol) {
+        return None;
+    }
+    if let Some((_, wire)) = events.iter().find(|(name, _)| *name == symbol) {
+        return Some(format!(
+            "Warning: '{symbol}' is the ABI name of an event, not its wire topic; \
+             did you mean '{wire}'? (the wire topic is the prefix topic). Querying anyway."
+        ));
+    }
+    let mut msg = format!("Warning: event topic '{symbol}' is not declared in the contract ABI");
+    if events.is_empty() {
+        msg.push_str(" (the ABI declares no events)");
+    } else {
+        let close = events.iter().find(|(name, wire)| {
+            name.eq_ignore_ascii_case(symbol) || wire.eq_ignore_ascii_case(symbol)
+        });
+        if let Some((_, wire)) = close {
+            msg.push_str(&format!(
+                "; did you mean '{wire}'? (topics are case-sensitive)"
+            ));
+        }
+        let mut declared: Vec<&str> = Vec::new();
+        for (_, wire) in &events {
+            if !declared.contains(wire) {
+                declared.push(wire);
+            }
+        }
+        msg.push_str(&format!("; declared: {}", declared.join(", ")));
+    }
+    msg.push_str(". Querying anyway.");
+    Some(msg)
+}
+
 fn parse_format_str(s: &str) -> OutputFormat {
     match s.to_lowercase().as_str() {
         "json" => OutputFormat::Json,
@@ -1942,6 +1545,203 @@ fn parse_format_str(s: &str) -> OutputFormat {
             eprintln!("Invalid format '{}'. Use 'json' or 'pretty'.", other);
             process::exit(1);
         }
+    }
+}
+
+/// Pretty-print a decoded transaction envelope for `tx decode`.
+fn print_envelope_pretty(view: &sdkt_xdr::EnvelopeView) {
+    println!("Transaction Envelope ({}):", view.envelope_type);
+    println!("  Source:     {}", view.source);
+    println!("  Sequence:   {}", view.sequence);
+    println!("  Fee:        {} stroops", view.fee);
+    if let Some(memo) = &view.memo {
+        println!("  Memo:       {}", memo);
+    }
+    println!("  Operations ({}):", view.operations.len());
+    for (i, op) in view.operations.iter().enumerate() {
+        println!("    [{}] {}", i, op.kind);
+        if let Some(source) = &op.source {
+            println!("        Source:    {}", source);
+        }
+        if let Some(contract) = &op.contract {
+            println!("        Contract:  {}", contract);
+        }
+        if let Some(function) = &op.function {
+            println!("        Function:  {}", function);
+        }
+        if !op.args.is_empty() {
+            println!("        Args:      {}", op.args.join(", "));
+        }
+        if op.auth_entries > 0 {
+            println!("        Auth:      {} entries", op.auth_entries);
+        }
+    }
+    if let Some(soroban) = &view.soroban {
+        println!("  Soroban Data:");
+        println!(
+            "    Footprint:    {} read-only, {} read-write",
+            soroban.read_only, soroban.read_write
+        );
+        println!("    Instructions: {}", soroban.instructions);
+        println!("    Disk reads:   {} bytes", soroban.disk_read_bytes);
+        println!("    Writes:       {} bytes", soroban.write_bytes);
+        println!("    Resource fee: {} stroops", soroban.resource_fee);
+    }
+    print_signatures("  ", &view.signatures);
+    if let Some(bump) = &view.fee_bump {
+        println!("  Fee Bump:");
+        println!("    Fee source: {}", bump.fee_source);
+        println!("    Fee:        {} stroops", bump.fee);
+        print_signatures("    ", &bump.signatures);
+    }
+}
+
+fn print_signatures(indent: &str, signatures: &[sdkt_xdr::envelope::SignatureView]) {
+    println!("{}Signatures: {}", indent, signatures.len());
+    for sig in signatures {
+        match &sig.signer {
+            Some(signer) => println!("{}  - ed25519, {}", indent, signer),
+            None => println!("{}  - hint {} (signer not in envelope)", indent, sig.hint),
+        }
+    }
+}
+
+/// Pretty-print a [`sdkt_storage::SnapshotDiff`] to stdout.
+fn print_diff_pretty(diff: &sdkt_storage::SnapshotDiff) {
+    use sdkt_storage::DiffStatus;
+
+    println!("Storage Diff for Contract: {}", diff.contract_id);
+    println!("Total entries: {}", diff.entries.len());
+
+    let removed: Vec<_> = diff
+        .entries
+        .iter()
+        .filter(|e| e.status == DiffStatus::Removed)
+        .collect();
+    let expiring: Vec<_> = diff
+        .entries
+        .iter()
+        .filter(|e| e.status == DiffStatus::ExpiringSoon)
+        .collect();
+    let unchanged: Vec<_> = diff
+        .entries
+        .iter()
+        .filter(|e| e.status == DiffStatus::Unchanged)
+        .collect();
+
+    println!(
+        "  Removed:       {} | Expiring Soon: {} | Unchanged: {}",
+        removed.len(),
+        expiring.len(),
+        unchanged.len()
+    );
+
+    if !removed.is_empty() {
+        println!("\nRemoved entries ({}):", removed.len());
+        for e in &removed {
+            println!(
+                "  [removed] key={}{} (old_ttl={})",
+                e.key,
+                e.label
+                    .as_ref()
+                    .map_or(String::new(), |l| format!(" label={l}")),
+                e.old_ttl.map_or("?".to_string(), |t| t.to_string())
+            );
+        }
+    }
+    if !expiring.is_empty() {
+        println!("\nExpiring soon ({}):", expiring.len());
+        for e in &expiring {
+            println!(
+                "  [expiring] key={}{} (ttl={})",
+                e.key,
+                e.label
+                    .as_ref()
+                    .map_or(String::new(), |l| format!(" label={l}")),
+                e.new_ttl.map_or("?".to_string(), |t| t.to_string())
+            );
+        }
+    }
+    if unchanged.iter().any(|e| e.label.is_some()) {
+        println!("\nUnchanged entries ({}):", unchanged.len());
+        for e in &unchanged {
+            println!(
+                "  [unchanged] key={}{} (ttl={})",
+                e.key,
+                e.label
+                    .as_ref()
+                    .map_or(String::new(), |l| format!(" label={l}")),
+                e.new_ttl.map_or("?".to_string(), |t| t.to_string())
+            );
+        }
+    }
+    if unchanged.is_empty() && removed.is_empty() && expiring.is_empty() {
+        println!("  (no entries)");
+    }
+}
+
+/// Project an ABI key name without changing the raw LedgerKey used for identity.
+fn storage_key_label(raw: &str, spec: &sdkt_wasm::ContractSpec) -> String {
+    use stellar_xdr::ScVal;
+
+    let Ok(stellar_xdr::LedgerKey::ContractData(data)) = sdkt_xdr::decode_ledger_key(raw) else {
+        return raw.to_string();
+    };
+    if matches!(data.key, ScVal::LedgerKeyContractInstance) {
+        return "instance".to_string();
+    }
+    let (name, args): (String, &[ScVal]) = match &data.key {
+        ScVal::Symbol(name) => (name.to_utf8_string_lossy(), &[]),
+        ScVal::Vec(Some(items)) => match items.first() {
+            Some(ScVal::Symbol(name)) => (name.to_utf8_string_lossy(), &items[1..]),
+            _ => return raw.to_string(),
+        },
+        _ => return raw.to_string(),
+    };
+    let name = name.as_str();
+    let mut matches =
+        spec.custom_types
+            .iter()
+            .filter(|ty| ty.kind == "union")
+            .flat_map(|ty| {
+                ty.members.iter().filter_map(move |member| {
+                    (member.name == name
+                        && member.types.len() == args.len()
+                        && member.types.iter().zip(args).all(|(ty, value)| {
+                            match ty.name.as_str() {
+                                "bool" => matches!(value, ScVal::Bool(_)),
+                                "u32" => matches!(value, ScVal::U32(_)),
+                                "i32" => matches!(value, ScVal::I32(_)),
+                                "u64" => matches!(value, ScVal::U64(_)),
+                                "i64" => matches!(value, ScVal::I64(_)),
+                                "u128" => matches!(value, ScVal::U128(_)),
+                                "i128" => matches!(value, ScVal::I128(_)),
+                                "string" => matches!(value, ScVal::String(_)),
+                                "symbol" => matches!(value, ScVal::Symbol(_)),
+                                "address" => matches!(value, ScVal::Address(_)),
+                                "bytes" => matches!(value, ScVal::Bytes(_)),
+                                _ => true,
+                            }
+                        }))
+                    .then_some((ty.name.as_str(), member))
+                })
+            });
+    let Some((type_name, member)) = matches.next() else {
+        return raw.to_string();
+    };
+    if matches.next().is_some() {
+        return raw.to_string();
+    }
+    if member.types.is_empty() {
+        format!("{type_name}::{}", member.name)
+    } else {
+        let args = member
+            .types
+            .iter()
+            .map(|ty| ty.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{type_name}::{}({args})", member.name)
     }
 }
 
@@ -2346,8 +2146,9 @@ fn render_storage_diff_pretty(diff: &SnapshotDiff) -> String {
 /// This is the write-direction counterpart to `sdkt decode`. Supported types
 /// are the primitives this CLI already encodes elsewhere (`parse_typed_args`):
 /// `u32`, `i32`, `u64`, `i64`, `u128`, `i128`, `bool`, `address`, `string`,
-/// `symbol`, `bytes`. Exactly one value is encoded per invocation; passing
-/// more than one is rejected to keep the output unambiguous.
+/// `symbol`, `bytes`. `json:<JSON>` encodes one composite value through
+/// `sdkt_xdr::json_to_scval`. Exactly one value is encoded per invocation;
+/// passing more than one is rejected to keep the output unambiguous.
 fn run_encode(values: &[String]) -> Result<String, String> {
     if values.is_empty() {
         return Err("no input provided: pass a value like u32:100".to_string());
@@ -2419,6 +2220,11 @@ fn run_encode(values: &[String]) -> Result<String, String> {
             .map_err(|_| format!("invalid Stellar address: {raw}"))?
             .into_scval()
             .map_err(|e| e.to_string())?,
+        "json" => {
+            let value: serde_json::Value = serde_json::from_str(raw)
+                .map_err(|e| format!("invalid JSON in '{arg}': {e}"))?;
+            sdkt_xdr::json_to_scval(&value).map_err(|e| format!("cannot encode '{arg}': {e}"))?
+        }
         other => {
             return Err(format!(
                 "unknown type '{other}'. Use u32|i32|u64|i64|u128|i128|bool|string|symbol|bytes|address"
@@ -2494,6 +2300,84 @@ mod encode_tests {
                 assert_eq!(parse_typed_args(&args, strict).unwrap_err(), encode_err);
             }
         }
+    }
+
+    /// Encode a `json:` input and decode the result back to an `ScVal`.
+    fn encode_json(json: &str) -> stellar_xdr::ScVal {
+        let b64 = run_encode(&[format!("json:{json}")]).unwrap_or_else(|e| panic!("{json}: {e}"));
+        sdkt_xdr::scval_from_base64(&b64).expect("valid ScVal XDR")
+    }
+
+    fn string(s: &str) -> stellar_xdr::ScVal {
+        use sdkt_xdr::IntoScVal;
+        s.to_string().into_scval().expect("short string")
+    }
+
+    #[test]
+    fn json_scalars_follow_converter_mapping() {
+        use stellar_xdr::ScVal;
+        assert_eq!(encode_json("null"), ScVal::Void);
+        assert_eq!(encode_json("true"), ScVal::Bool(true));
+        assert_eq!(encode_json("false"), ScVal::Bool(false));
+        assert_eq!(encode_json("1"), ScVal::U32(1));
+        assert_eq!(encode_json("-5"), ScVal::I32(-5));
+        assert_eq!(encode_json("4294967296"), ScVal::U64(4_294_967_296));
+        assert_eq!(encode_json("18446744073709551615"), ScVal::U64(u64::MAX));
+        assert_eq!(encode_json("-2147483649"), ScVal::I64(-2_147_483_649));
+        // An integer-valued JSON number matches the explicit scalar form byte for byte.
+        assert_eq!(
+            run_encode(&["json:-5".to_string()]),
+            run_encode(&["i32:-5".to_string()])
+        );
+    }
+
+    #[test]
+    fn json_containers_encode_as_one_value() {
+        use stellar_xdr::ScVal;
+        let ScVal::Vec(Some(items)) = encode_json("[1,2,3]") else {
+            panic!("expected a Vec");
+        };
+        assert_eq!(
+            items.0.to_vec(),
+            vec![ScVal::U32(1), ScVal::U32(2), ScVal::U32(3)]
+        );
+        assert!(matches!(encode_json("[]"), ScVal::Vec(Some(v)) if v.0.is_empty()));
+        assert!(matches!(encode_json("{}"), ScVal::Map(Some(m)) if m.0.is_empty()));
+
+        let ScVal::Map(Some(map)) = encode_json(r#"{"bob":"250","alice":"100"}"#) else {
+            panic!("expected a Map");
+        };
+        // Keys are Strings, emitted in sorted order as Soroban maps require.
+        let keys: Vec<_> = map.0.iter().map(|e| e.key.clone()).collect();
+        assert_eq!(keys, vec![string("alice"), string("bob")]);
+        assert_eq!(map.0[0].val, string("100"));
+    }
+
+    #[test]
+    fn json_nesting_is_preserved() {
+        use stellar_xdr::ScVal;
+        let ScVal::Vec(Some(outer)) = encode_json(r#"[{"alice":"100"},[null,true]]"#) else {
+            panic!("expected a Vec");
+        };
+        assert!(matches!(&outer.0[0], ScVal::Map(Some(m)) if m.0.len() == 1));
+        let ScVal::Vec(Some(inner)) = &outer.0[1] else {
+            panic!("expected a nested Vec");
+        };
+        assert_eq!(inner.0.to_vec(), vec![ScVal::Void, ScVal::Bool(true)]);
+    }
+
+    #[test]
+    fn json_errors_name_the_input_without_panicking() {
+        for input in ["json:[1,2", "json:{alice:1}", "json:", "json:[1] trailing"] {
+            let err = run_encode(&[input.to_string()]).unwrap_err();
+            assert!(
+                err.starts_with(&format!("invalid JSON in '{input}': ")),
+                "{input}: {err}"
+            );
+        }
+        // Valid JSON the converter cannot represent (floats) is also reported per input.
+        let err = run_encode(&["json:1.5".to_string()]).unwrap_err();
+        assert_eq!(err, "cannot encode 'json:1.5': invalid JSON argument: 1.5");
     }
 }
 
@@ -2679,6 +2563,42 @@ async fn run_upgrade_safety(
         );
     }
     Ok(())
+}
+
+fn collect_rust_sources(path: &std::path::Path) -> Result<Vec<std::path::PathBuf>, std::io::Error> {
+    if path.is_file() {
+        // Preserve the single-file audit behavior for explicitly supplied source
+        // files, including temporary files without a `.rs` extension. Directory
+        // discovery below remains restricted to Rust source files.
+        return Ok(vec![path.to_path_buf()]);
+    }
+
+    if !path.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("path does not exist: {}", path.display()),
+        ));
+    }
+
+    let mut files = Vec::new();
+    let mut stack = vec![path.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let entry_path = entry.path();
+            let file_type = entry.file_type()?;
+
+            if file_type.is_dir() {
+                stack.push(entry_path);
+            } else if file_type.is_file() && entry_path.extension().is_some_and(|ext| ext == "rs") {
+                files.push(entry_path);
+            }
+        }
+    }
+
+    files.sort();
+    Ok(files)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -3069,6 +2989,166 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
 
+            // Storage storage-diff is completely offline and self-contained; dispatch
+            // before shared storage RPC client setup or on-chain ABI resolution.
+            if let StorageAction::StorageDiff {
+                old,
+                new,
+                extend_plan,
+                format,
+            } = &action
+            {
+                if abi.is_some() && abi_contract.is_some() {
+                    eprintln!("Error: specify only one of --abi or --abi-contract");
+                    process::exit(1);
+                }
+
+                let fmt = parse_format_str(format);
+                let contract_spec = if let Some(wasm_path) = abi.as_ref() {
+                    let bytes = fs::read(wasm_path)?;
+                    Some(parse_contract_spec(&bytes)?)
+                } else if let Some(id) = abi_contract.as_ref() {
+                    let client = resolve_rpc_client(
+                        net.rpc_url.clone(),
+                        net.network_passphrase.clone(),
+                        net.network_profile.clone(),
+                    );
+                    let inspection = inspect_contract(&client, id).await?;
+                    let bytes = get_wasm_bytecode(&client, &inspection.wasm_hash).await?;
+                    Some(parse_contract_spec(&bytes)?)
+                } else {
+                    None
+                };
+
+                // Load old snapshot JSON (output of `sdkt storage analyze --format json`).
+                let old_bytes = match fs::read(old) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("Failed to read --old snapshot '{old}': {e}");
+                        process::exit(1);
+                    }
+                };
+                let old_report: sdkt_storage::StorageReport =
+                    match serde_json::from_slice(&old_bytes) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("Failed to parse --old snapshot '{old}': {e}");
+                            process::exit(1);
+                        }
+                    };
+
+                // Load new snapshot JSON.
+                let new_bytes = match fs::read(new) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("Failed to read --new snapshot '{new}': {e}");
+                        process::exit(1);
+                    }
+                };
+                let new_report: sdkt_storage::StorageReport =
+                    match serde_json::from_slice(&new_bytes) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("Failed to parse --new snapshot '{new}': {e}");
+                            process::exit(1);
+                        }
+                    };
+
+                let mut old_snap = match sdkt_storage::StorageSnapshot::from_report(&old_report) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("Failed to load --old snapshot '{old}': {e}");
+                        process::exit(1);
+                    }
+                };
+                let mut new_snap = match sdkt_storage::StorageSnapshot::from_report(&new_report) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("Failed to load --new snapshot '{new}': {e}");
+                        process::exit(1);
+                    }
+                };
+                if let Some(spec) = contract_spec.as_ref() {
+                    for entry in old_snap
+                        .entries
+                        .iter_mut()
+                        .chain(new_snap.entries.iter_mut())
+                    {
+                        entry.label = Some(storage_key_label(&entry.key, spec));
+                    }
+                }
+                let diff = match sdkt_storage::diff_snapshots(&old_snap, &new_snap) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        process::exit(1);
+                    }
+                };
+
+                if *extend_plan {
+                    let plan = sdkt_storage::derive_extend_plan(&diff);
+                    if fmt == OutputFormat::Json {
+                        let out = serde_json::json!({
+                            "diff": &diff,
+                            "extend_plan": &plan,
+                        });
+                        println!("{}", serde_json::to_string(&out)?);
+                    } else {
+                        print_diff_pretty(&diff);
+                        println!();
+                        println!("Extension Plan");
+                        println!("  Contract:            {}", plan.contract_id);
+                        if plan.keys.is_empty() {
+                            println!("  Keys:                (none — nothing to remediate)");
+                        } else {
+                            println!("  Keys ({}):", plan.keys.len());
+                            for (i, k) in plan.keys.iter().enumerate() {
+                                println!("    #{} {}", i + 1, k);
+                            }
+                        }
+                        println!("  Suggested --ledgers: {}", plan.suggested_ledgers);
+                        println!("  Reason:              {}", plan.suggested_ledgers_reason);
+                        if !plan.keys.is_empty() {
+                            println!();
+                            println!("  Ready-to-run:");
+                            let mut net_args = String::new();
+                            if let Some(ref p) = net.network_profile {
+                                net_args
+                                    .push_str(&format!(" --network-profile {}", shell_quote(p)));
+                            }
+                            if let Some(ref u) = net.rpc_url {
+                                net_args.push_str(&format!(" --rpc-url {}", shell_quote(u)));
+                            }
+                            if let Some(ref pass) = net.network_passphrase {
+                                net_args.push_str(&format!(
+                                    " --network-passphrase {}",
+                                    shell_quote(pass)
+                                ));
+                            }
+
+                            let key_args: String = plan
+                                .keys
+                                .iter()
+                                .map(|k| format!(" --key {}", shell_quote(k)))
+                                .collect::<Vec<_>>()
+                                .join("");
+                            println!(
+                                "    sdkt storage extend --contract {} --ledgers {}{}{}",
+                                shell_quote(&plan.contract_id),
+                                plan.suggested_ledgers,
+                                net_args,
+                                key_args
+                            );
+                        }
+                    }
+                } else if fmt == OutputFormat::Json {
+                    println!("{}", serde_json::to_string(&diff)?);
+                } else {
+                    print_diff_pretty(&diff);
+                }
+                return Ok(());
+            }
+
             if abi.is_some() && abi_contract.is_some() {
                 eprintln!("Error: specify only one of --abi or --abi-contract");
                 process::exit(1);
@@ -3160,21 +3240,15 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                     match get_ttl_info(&client, &contract_id).await {
                         Ok(ttl_info) => {
                             if fmt == OutputFormat::Json {
-                                if let Some(spec) = contract_spec {
-                                    let json_str = serde_json::to_string(&serde_json::json!({
-                                        "contract_id": contract_id,
-                                        "entries": ttl_info.entries.len(),
-                                        "abi": serde_json::json!({
+                                let mut output = serde_json::to_value(&ttl_info)?;
+                                if let Some(spec) = contract_spec.as_ref() {
+                                    output["abi"] = serde_json::json!({
                                             "functions": spec.functions.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
                                             "events": spec.events.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
                                             "custom_types": spec.custom_types.iter().map(|t| t.name.as_str()).collect::<Vec<_>>()
-                                        })
-                                    }))?;
-                                    println!("{}", json_str);
-                                } else {
-                                    let json_str = serde_json::to_string(&ttl_info)?;
-                                    println!("{}", json_str);
+                                    });
                                 }
+                                println!("{}", serde_json::to_string(&output)?);
                             } else {
                                 println!("Storage Check for Contract ID: {}", contract_id);
                                 println!("Total Entries: {}", ttl_info.entries.len());
@@ -3233,7 +3307,12 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                         .inspect_contract_storage_keys(&contract_id, &extra_keys)
                         .await
                     {
-                        Ok(report) => {
+                        Ok(mut report) => {
+                            if let Some(spec) = contract_spec.as_ref() {
+                                for entry in &mut report.entries {
+                                    entry.label = Some(storage_key_label(&entry.key, spec));
+                                }
+                            }
                             if fmt == OutputFormat::Json {
                                 println!("{}", serde_json::to_string(&report)?);
                             } else {
@@ -3269,6 +3348,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                                             entry.days_remaining,
                                             entry.extension_cost_stroops
                                         );
+                                        if let Some(label) = &entry.label {
+                                            println!("        key={} label={}", entry.key, label);
+                                        }
                                     }
                                 }
                             }
@@ -3450,12 +3532,19 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
 
                     let identity_store = sdkt_storage::IdentityStore::new()
                         .map_err(|e| format!("Failed to access identity store: {}", e))?;
+                    // `--identity` defaults to the reserved "default" sentinel;
+                    // resolve it to the configured default identity, if any.
                     let identity_obj = identity_store
-                        .get(&identity)
-                        .map_err(|e| format!("Identity '{}' not found: {}", identity, e))?;
-                    let signing_key = identity_store.load_signing_key(&identity).map_err(|e| {
-                        format!("Failed to load signing key for '{}': {}", identity, e)
-                    })?;
+                        .resolve_signing_identity(&identity)
+                        .map_err(|e| format!("Failed to resolve signing identity: {}", e))?;
+                    let signing_key = identity_store
+                        .load_signing_key(&identity_obj.name)
+                        .map_err(|e| {
+                            format!(
+                                "Failed to load signing key for '{}': {}",
+                                identity_obj.name, e
+                            )
+                        })?;
                     let signer = sdkt_xdr::sign::Ed25519Signer::from_seed(&signing_key.to_bytes());
                     let source_account = identity_obj.public_key.clone();
                     let client = SorobanRpcClient::from_config(&network_config);
@@ -3551,12 +3640,19 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
 
                     let identity_store = sdkt_storage::IdentityStore::new()
                         .map_err(|e| format!("Failed to access identity store: {}", e))?;
+                    // `--identity` defaults to the reserved "default" sentinel;
+                    // resolve it to the configured default identity, if any.
                     let identity_obj = identity_store
-                        .get(&identity)
-                        .map_err(|e| format!("Identity '{}' not found: {}", identity, e))?;
-                    let signing_key = identity_store.load_signing_key(&identity).map_err(|e| {
-                        format!("Failed to load signing key for '{}': {}", identity, e)
-                    })?;
+                        .resolve_signing_identity(&identity)
+                        .map_err(|e| format!("Failed to resolve signing identity: {}", e))?;
+                    let signing_key = identity_store
+                        .load_signing_key(&identity_obj.name)
+                        .map_err(|e| {
+                            format!(
+                                "Failed to load signing key for '{}': {}",
+                                identity_obj.name, e
+                            )
+                        })?;
                     let signer = sdkt_xdr::sign::Ed25519Signer::from_seed(&signing_key.to_bytes());
                     let source_account = identity_obj.public_key.clone();
                     let client = SorobanRpcClient::from_config(&network_config);
@@ -3676,8 +3772,25 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                         .await
                     {
                         Ok(res) => {
+                            // TTL context is optional enrichment. If fetching
+                            // the current ledger fails, keep the absolute TTL
+                            // display and existing JSON shape.
+                            let ttl_context = if let Some(live_until) = res.live_until_ledger {
+                                client.get_ledger().await.ok().map(|ledger| {
+                                    let remaining = live_until.saturating_sub(ledger.sequence);
+                                    (remaining, remaining <= EXPIRING_SOON_LEDGERS)
+                                })
+                            } else {
+                                None
+                            };
+
                             if fmt == OutputFormat::Json {
-                                println!("{}", serde_json::to_string(&res)?);
+                                let mut output = serde_json::to_value(&res)?;
+                                if let Some((remaining, expiring_soon)) = ttl_context {
+                                    output["ledgers_remaining"] = serde_json::json!(remaining);
+                                    output["expiring_soon"] = serde_json::json!(expiring_soon);
+                                }
+                                println!("{}", serde_json::to_string(&output)?);
                             } else {
                                 println!("Contract State Read");
                                 println!("  Contract:       {}", res.contract_id);
@@ -3687,7 +3800,22 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                                     println!("  Durability:     {dur}");
                                 }
                                 if let Some(ttl) = res.live_until_ledger {
-                                    println!("  Live Until:     {ttl} (ledger)");
+                                    if let Some((remaining, expiring_soon)) = ttl_context {
+                                        let approx_days = remaining as f64 * 5.0 / 86_400.0;
+                                        println!(
+                                            "  Live Until:     {ttl} (ledger; {remaining} ledgers remaining, ~{approx_days:.2} days at 5s/ledger)"
+                                        );
+                                        if expiring_soon {
+                                            println!(
+                                                "  Caution:        Entry is expiring soon. Extend it with: sdkt storage extend --contract {} --key {} --ledgers {}",
+                                                res.contract_id,
+                                                res.key,
+                                                DEFAULT_SUGGESTED_LEDGERS
+                                            );
+                                        }
+                                    } else {
+                                        println!("  Live Until:     {ttl} (ledger)");
+                                    }
                                 }
                                 println!(
                                     "  Value:          {}",
@@ -3701,6 +3829,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
+                StorageAction::StorageDiff { .. } => unreachable!(),
             }
         }
         Commands::Inspect {
@@ -3752,18 +3881,11 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             match inspect_contract(&client, &contract_id).await {
                 Ok(inspection) => {
                     if fmt == OutputFormat::Json {
-                        if let Some(spec) = contract_spec {
-                            let json_str = serde_json::to_string(&serde_json::json!({
-                                "contract_id": inspection.contract_id,
-                                "wasm_hash": inspection.wasm_hash,
-                                "storage_keys": inspection.storage_keys.len(),
-                                "abi": spec
-                            }))?;
-                            println!("{}", json_str);
-                        } else {
-                            let json_str = serde_json::to_string(&inspection)?;
-                            println!("{}", json_str);
+                        let mut output = serde_json::to_value(&inspection)?;
+                        if let Some(spec) = contract_spec.as_ref() {
+                            output["abi_spec"] = serde_json::to_value(spec)?;
                         }
+                        println!("{}", serde_json::to_string(&output)?);
                     } else {
                         if interface {
                             if let Some(spec) = contract_spec.as_ref() {
@@ -4117,6 +4239,28 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                     process::exit(1);
                 }
             }
+            TxAction::Decode { envelope, format } => {
+                let fmt = parse_format_str(&format);
+                let env_data = match resolve_tx_input(&envelope) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        process::exit(1);
+                    }
+                };
+                let view = match sdkt_xdr::decode_envelope(&env_data) {
+                    Ok(view) => view,
+                    Err(e) => {
+                        eprintln!("Error: invalid transaction envelope: {}", e);
+                        process::exit(1);
+                    }
+                };
+                if fmt == OutputFormat::Json {
+                    println!("{}", serde_json::to_string_pretty(&view)?);
+                } else {
+                    print_envelope_pretty(&view);
+                }
+            }
             TxAction::Simulate {
                 envelope,
                 format,
@@ -4327,7 +4471,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                     net.network_profile.clone(),
                 );
 
-                use sdkt_rpc::{submit_and_wait, PollConfig};
+                use sdkt_rpc::{submit_and_wait, PollConfig, TransactionStatus};
                 use std::time::Duration;
 
                 let poll_cfg = PollConfig {
@@ -4355,6 +4499,25 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                                     println!("    {}", event);
                                 }
                             }
+                            if let Some(code) = &res.error_code {
+                                println!("  Error:    {}", code);
+                            }
+                            if let Some(xdr) = &res.error_result_xdr {
+                                println!("  Error Result XDR: {}", xdr);
+                            }
+                            if !res.diagnostic_events.is_empty() {
+                                println!("  Diagnostics:");
+                                for event in &res.diagnostic_events {
+                                    println!("    {}", event);
+                                }
+                            }
+                        }
+                        // A settled on-chain failure must not look like a
+                        // success to scripts: match `invoke`, which already
+                        // exits 1 unless the status is SUCCESS (a no-wait
+                        // PENDING submission still exits 0).
+                        if res.status == TransactionStatus::Failed {
+                            process::exit(1);
                         }
                     }
                     Err(e) => {
@@ -4372,8 +4535,29 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 arg,
                 format,
                 output,
+                memo_text,
+                memo_id,
             } => {
                 let fmt = parse_format_str(&format);
+
+                // `--memo-text` and `--memo-id` are mutually exclusive. Fail
+                // deterministically before any network I/O (same pre-check style
+                // as the `--abi` / `--abi-contract` flags elsewhere in this file).
+                if memo_text.is_some() && memo_id.is_some() {
+                    eprintln!("Error: specify only one of --memo-text or --memo-id");
+                    process::exit(1);
+                }
+                let memo = match (memo_text.as_deref(), memo_id) {
+                    (Some(text), _) => match sdkt_xdr::memo_text(text) {
+                        Ok(memo) => Some(memo),
+                        Err(e) => {
+                            eprintln!("Error: {e}");
+                            process::exit(1);
+                        }
+                    },
+                    (None, Some(id)) => Some(sdkt_xdr::memo_id(id)),
+                    (None, None) => None,
+                };
 
                 // If source doesn't start with 'G' and isn't 56 chars, try to load it as an identity
                 let mut source_account = source.clone();
@@ -4433,6 +4617,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                     contract_id: contract.clone(),
                     function: function.clone(),
                     args: parsed_args,
+                    memo,
                 };
 
                 // Fee precedence:
@@ -4573,10 +4758,24 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                         process::exit(1);
                     }
                 };
-                let signing_key = match store.load_signing_key(&identity) {
+                // The flag defaults to the reserved "default" sentinel, which
+                // resolves to the configured default identity; an explicit name
+                // is looked up verbatim.
+                let identity_obj = match store.resolve_signing_identity(&identity) {
+                    Ok(obj) => obj,
+                    Err(e) => {
+                        if identity == sdkt_storage::DEFAULT_IDENTITY_NAME {
+                            eprintln!("Error: {}", e);
+                        } else {
+                            eprintln!("Error: unknown identity '{}'", identity);
+                        }
+                        process::exit(1);
+                    }
+                };
+                let signing_key = match store.load_signing_key(&identity_obj.name) {
                     Ok(k) => k,
-                    Err(_) => {
-                        eprintln!("Error: unknown identity '{}'", identity);
+                    Err(e) => {
+                        eprintln!("Error: cannot load identity '{}': {}", identity_obj.name, e);
                         process::exit(1);
                     }
                 };
@@ -4628,6 +4827,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             end_ledger,
             abi,
             abi_contract,
+            topic,
             net,
         } => {
             let fmt = parse_format_str(&format);
@@ -4646,6 +4846,18 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                     process::exit(1);
                 }
             }
+
+            // Encode `--topic` before any RPC call so an invalid symbol fails fast.
+            let topic_filters = match topic.as_deref() {
+                Some(symbol) => match sdkt_xdr::symbol_topic_base64(symbol) {
+                    Ok(b64) => Some(vec![first_topic_filter(b64)]),
+                    Err(e) => {
+                        eprintln!("Error: --topic: {e}");
+                        process::exit(1);
+                    }
+                },
+                None => None,
+            };
 
             // Resolve the ABI ContractSpec from one of two sources (mutually
             // exclusive): a local WASM file (`--abi`) or a deployed contract's
@@ -4683,7 +4895,21 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                     None
                 };
 
-            match get_contract_events(&client, &contract_id, start_ledger, end_ledger).await {
+            if let (Some(spec), Some(symbol)) = (contract_spec.as_ref(), topic.as_deref()) {
+                if let Some(warning) = unknown_event_topic_warning(spec, symbol) {
+                    eprintln!("{warning}");
+                }
+            }
+
+            match get_contract_events_filtered(
+                &client,
+                &contract_id,
+                start_ledger,
+                end_ledger,
+                topic_filters,
+            )
+            .await
+            {
                 Ok(events) => {
                     if let Some(spec) = contract_spec {
                         // ABI-aware decoding: topics[0] is the event symbol,
@@ -4819,7 +5045,14 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("  (none)");
                         } else {
                             for b in account.balances {
-                                println!("  Asset: {}", b.asset_type);
+                                if let (Some(code), Some(issuer)) = (&b.asset_code, &b.asset_issuer)
+                                {
+                                    println!("  Asset: {}:{} ({})", code, issuer, b.asset_type);
+                                } else if let Some(code) = &b.asset_code {
+                                    println!("  Asset: {} ({})", code, b.asset_type);
+                                } else {
+                                    println!("  Asset: {}", b.asset_type);
+                                }
                                 println!("  Balance: {}", b.balance);
                             }
                         }
@@ -4828,7 +5061,8 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("  (none)");
                         } else {
                             for s in account.signers {
-                                println!("  Public Key: {}", s.public_key);
+                                println!("  Type: {}", s.key_type);
+                                println!("  Key: {}", s.key);
                                 println!(
                                     "  Weight: {}",
                                     s.weight.map_or("Unknown".to_string(), |w| w.to_string())
@@ -5036,7 +5270,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Audit {
-            path,
+            paths,
             format,
             list_rules,
             disable,
@@ -5114,18 +5348,6 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
 
-            let path = match path {
-                Some(p) => p,
-                None => {
-                    let mut cmd = Cli::command();
-                    cmd.error(
-                        clap::error::ErrorKind::MissingRequiredArgument,
-                        "the following required arguments were not provided:\n  <PATH>",
-                    )
-                    .exit();
-                }
-            };
-
             if !rules.is_empty() {
                 // Validate/resolve each --rules entry before reading source.
                 for r in &rules {
@@ -5148,31 +5370,116 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            let src = fs::read_to_string(&path)
-                .map_err(|e| format!("Failed to read source '{}': {}", path, e))?;
+            let mut source_paths = Vec::new();
 
-            #[allow(unused_mut)]
-            let mut loaded_plugins = 0usize;
+            for input in &paths {
+                let input_path = std::path::Path::new(input);
+                let discovered = collect_rust_sources(input_path).map_err(|e| {
+                    if paths.len() == 1 && input_path.extension().is_some_and(|ext| ext == "rs") {
+                        format!("Failed to read source '{}': {}", input, e)
+                    } else {
+                        format!("Failed to discover Rust sources '{}': {}", input, e)
+                    }
+                })?;
 
-            if rules.is_empty() {
-                if !no_plugins {
-                    let installed = sdkt_audit::plugin_store::list();
-                    for meta in installed {
-                        if meta.abi_major != sdkt_audit::plugin_abi::SDKT_AUDIT_ABI_MAJOR {
-                            eprintln!(
-                                "Warning: skipping plugin '{}': ABI mismatch (plugin v{}.x, host v{}.x)",
-                                meta.id, meta.abi_major, sdkt_audit::plugin_abi::SDKT_AUDIT_ABI_MAJOR
-                            );
+                source_paths.extend(discovered);
+            }
+
+            source_paths.sort();
+            source_paths.dedup();
+
+            if source_paths.is_empty() {
+                return Err("No Rust source files (.rs) found in the supplied paths".into());
+            }
+
+            let single_file = paths.len() == 1
+                && source_paths.len() == 1
+                && std::path::Path::new(&paths[0]).is_file();
+            let multi_file = !single_file;
+
+            let multi_file_plugin_paths: Vec<(std::path::PathBuf, String)> = {
+                #[allow(unused_mut)]
+                let mut paths_out = Vec::new();
+                if rules.is_empty() {
+                    if !no_plugins {
+                        let installed = sdkt_audit::plugin_store::list();
+                        for meta in installed {
+                            if meta.abi_major != sdkt_audit::plugin_abi::SDKT_AUDIT_ABI_MAJOR {
+                                eprintln!(
+                                    "Warning: skipping plugin '{}': ABI mismatch (plugin v{}.x, host v{}.x)",
+                                    meta.id, meta.abi_major, sdkt_audit::plugin_abi::SDKT_AUDIT_ABI_MAJOR
+                                );
+                                continue;
+                            }
+
+                            let Some(artifact_path) = sdkt_audit::plugin_store::resolve(&meta.id)
+                            else {
+                                eprintln!(
+                                    "Warning: skipping plugin '{}': artifact not found",
+                                    meta.id
+                                );
+                                continue;
+                            };
+
+                            let ext = artifact_path
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .map(|e| e.to_ascii_lowercase())
+                                .unwrap_or_default();
+
+                            match ext.as_str() {
+                                "so" | "dylib" | "dll" => {
+                                    #[cfg(feature = "plugins")]
+                                    {
+                                        paths_out.push((artifact_path, meta.id.clone()));
+                                    }
+                                    #[cfg(not(feature = "plugins"))]
+                                    {
+                                        eprintln!(
+                                            "Warning: skipping native plugin '{}': build compiled without `plugins` feature",
+                                            meta.id
+                                        );
+                                    }
+                                }
+                                "wasm" => {
+                                    #[cfg(feature = "wasm-plugins")]
+                                    {
+                                        paths_out.push((artifact_path, meta.id.clone()));
+                                    }
+                                    #[cfg(not(feature = "wasm-plugins"))]
+                                    {
+                                        eprintln!(
+                                            "Warning: skipping WASM plugin '{}': build compiled without `wasm-plugins` feature",
+                                            meta.id
+                                        );
+                                    }
+                                }
+                                _ => {
+                                    eprintln!(
+                                        "Warning: skipping plugin '{}': unsupported artifact format",
+                                        meta.id
+                                    );
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    for r in &rules {
+                        if let Some(meta) = sdkt_audit::plugin_store::show(r) {
+                            if meta.abi_major != sdkt_audit::plugin_abi::SDKT_AUDIT_ABI_MAJOR {
+                                continue;
+                            }
+                        }
+
+                        let resolved = sdkt_audit::plugin_store::resolve(r)
+                            .unwrap_or_else(|| std::path::PathBuf::from(r));
+                        let path_r = resolved.as_path();
+
+                        if path_r.is_dir() {
                             continue;
                         }
 
-                        let Some(artifact_path) = sdkt_audit::plugin_store::resolve(&meta.id)
-                        else {
-                            eprintln!("Warning: skipping plugin '{}': artifact not found", meta.id);
-                            continue;
-                        };
-
-                        let ext = artifact_path
+                        let ext = path_r
                             .extension()
                             .and_then(|e| e.to_str())
                             .map(|e| e.to_ascii_lowercase())
@@ -5182,68 +5489,83 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                             "so" | "dylib" | "dll" => {
                                 #[cfg(feature = "plugins")]
                                 {
-                                    match sdkt_audit::load_and_register(&artifact_path, &src) {
-                                        Ok(_) => loaded_plugins += 1,
-                                        Err(e) => eprintln!(
-                                            "Warning: skipping native plugin '{}': {}",
-                                            meta.id, e
-                                        ),
-                                    }
+                                    paths_out.push((path_r.to_path_buf(), r.clone()));
                                 }
                                 #[cfg(not(feature = "plugins"))]
                                 {
                                     eprintln!(
-                                        "Warning: skipping native plugin '{}': build compiled without `plugins` feature",
-                                        meta.id
+                                        "Error: '{}' is a native plugin artifact but this build was compiled \
+                                         without the `plugins` feature. Rebuild with --features plugins.",
+                                        r
                                     );
+                                    process::exit(1);
                                 }
                             }
                             "wasm" => {
                                 #[cfg(feature = "wasm-plugins")]
                                 {
-                                    match sdkt_audit::load_and_register_wasm(&artifact_path, &src) {
-                                        Ok(_) => loaded_plugins += 1,
-                                        Err(e) => eprintln!(
-                                            "Warning: skipping WASM plugin '{}': {}",
-                                            meta.id, e
-                                        ),
-                                    }
+                                    paths_out.push((path_r.to_path_buf(), r.clone()));
                                 }
                                 #[cfg(not(feature = "wasm-plugins"))]
                                 {
                                     eprintln!(
-                                        "Warning: skipping WASM plugin '{}': build compiled without `wasm-plugins` feature",
-                                        meta.id
+                                        "Error: '{}' is a WASM plugin artifact but this build was compiled \
+                                         without the `wasm-plugins` feature. Rebuild with --features wasm-plugins.",
+                                        r
                                     );
+                                    process::exit(1);
                                 }
                             }
                             _ => {
                                 eprintln!(
                                     "Warning: skipping plugin '{}': unsupported artifact format",
-                                    meta.id
+                                    r
                                 );
                             }
                         }
                     }
                 }
-            } else {
-                for r in &rules {
-                    if let Some(meta) = sdkt_audit::plugin_store::show(r) {
-                        if meta.abi_major != sdkt_audit::plugin_abi::SDKT_AUDIT_ABI_MAJOR {
-                            continue;
-                        }
-                    }
+                paths_out
+            };
 
-                    let resolved = sdkt_audit::plugin_store::resolve(r)
-                        .unwrap_or_else(|| std::path::PathBuf::from(r));
-                    let path_r = resolved.as_path();
+            let disabled_refs: Vec<&str> = disable.iter().map(String::as_str).collect();
 
-                    // Directories pass through as no-ops (validated for existence above).
-                    if path_r.is_dir() {
+            let mut aggregate = sdkt_audit::AuditReport::default();
+            let mut per_file = Vec::new();
+            let mut had_file_errors = false;
+            #[allow(unused_mut)]
+            let mut loaded_plugins = 0usize;
+
+            for source_path in &source_paths {
+                let source = match fs::read_to_string(source_path) {
+                    Ok(source) => source,
+                    Err(e) => {
+                        had_file_errors = true;
+
+                        let finding = sdkt_audit::Finding {
+                            rule_id: "AUDIT-IO".to_string(),
+                            severity: sdkt_audit::Severity::Critical,
+                            message: format!("Failed to read source: {}", e),
+                            location: None,
+                            file: Some(source_path.display().to_string()),
+                        };
+
+                        let mut report = sdkt_audit::AuditReport::default();
+                        report.add(finding.clone());
+
+                        aggregate.add(finding);
+                        per_file.push((source_path.clone(), report));
                         continue;
                     }
+                };
 
-                    let ext = path_r
+                let mut local_reg = sdkt_audit::RuleRegistry::new();
+                if multi_file {
+                    local_reg.register_builtin_rules();
+                }
+
+                for (plugin_path, plugin_id) in &multi_file_plugin_paths {
+                    let ext = plugin_path
                         .extension()
                         .and_then(|e| e.to_str())
                         .map(|e| e.to_ascii_lowercase())
@@ -5253,8 +5575,19 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                         "so" | "dylib" | "dll" => {
                             #[cfg(feature = "plugins")]
                             {
-                                match sdkt_audit::load_and_register(path_r, &src) {
-                                    Ok(_) => loaded_plugins += 1,
+                                let result = if single_file {
+                                    sdkt_audit::load_and_register(plugin_path, &source).map(|_| ())
+                                } else {
+                                    sdkt_audit::PluginRule::load(plugin_path, &source)
+                                        .map(|rule| local_reg.register_rule(Box::new(rule)))
+                                };
+
+                                match result {
+                                    Ok(()) => {
+                                        if single_file {
+                                            loaded_plugins += 1;
+                                        }
+                                    }
                                     Err(e) => {
                                         if matches!(
                                             e,
@@ -5262,11 +5595,14 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                                         ) {
                                             eprintln!(
                                                 "Warning: skipping native plugin '{}': {}",
-                                                r, e
+                                                plugin_id, e
                                             );
                                             continue;
                                         }
-                                        eprintln!("Error loading native plugin '{}': {}", r, e);
+                                        eprintln!(
+                                            "Error loading native plugin '{}': {}",
+                                            plugin_id, e
+                                        );
                                         process::exit(1);
                                     }
                                 }
@@ -5276,7 +5612,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                                 eprintln!(
                                     "Error: '{}' is a native plugin artifact but this build was compiled \
                                      without the `plugins` feature. Rebuild with --features plugins.",
-                                    r
+                                    plugin_id
                                 );
                                 process::exit(1);
                             }
@@ -5284,8 +5620,20 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                         "wasm" => {
                             #[cfg(feature = "wasm-plugins")]
                             {
-                                match sdkt_audit::load_and_register_wasm(path_r, &src) {
-                                    Ok(_) => loaded_plugins += 1,
+                                let result = if single_file {
+                                    sdkt_audit::load_and_register_wasm(plugin_path, &source)
+                                        .map(|_| ())
+                                } else {
+                                    sdkt_audit::WasmPluginRule::load(plugin_path, &source)
+                                        .map(|rule| local_reg.register_rule(Box::new(rule)))
+                                };
+
+                                match result {
+                                    Ok(()) => {
+                                        if single_file {
+                                            loaded_plugins += 1;
+                                        }
+                                    }
                                     Err(e) => {
                                         if matches!(
                                             e,
@@ -5293,11 +5641,14 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                                         ) {
                                             eprintln!(
                                                 "Warning: skipping WASM plugin '{}': {}",
-                                                r, e
+                                                plugin_id, e
                                             );
                                             continue;
                                         }
-                                        eprintln!("Error loading WASM plugin '{}': {}", r, e);
+                                        eprintln!(
+                                            "Error loading WASM plugin '{}': {}",
+                                            plugin_id, e
+                                        );
                                         process::exit(1);
                                     }
                                 }
@@ -5307,93 +5658,192 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                                 eprintln!(
                                     "Error: '{}' is a WASM plugin artifact but this build was compiled \
                                      without the `wasm-plugins` feature. Rebuild with --features wasm-plugins.",
-                                    r
+                                    plugin_id
                                 );
                                 process::exit(1);
                             }
                         }
-                        "rs" => {
-                            // semantic: source files passed in --rules are existence-validated
-                            // above but not loaded at runtime (built-in rules register themselves).
-                        }
                         _ => {
                             eprintln!(
-                                "Error: Unsupported plugin format: {}\n\nSupported plugin formats:\n  .so\n  .dll\n  .dylib\n  .wasm",
-                                r
+                                "Warning: skipping plugin '{}': unsupported artifact format",
+                                plugin_id
                             );
+                        }
+                    }
+                }
+
+                if single_file {
+                    // Load dynamic rules first so registry ID deduplication
+                    // preserves the original single-file behavior.
+                    #[cfg(feature = "plugins")]
+                    sdkt_audit_example_rule::register();
+
+                    match sdkt_audit::audit_source_with(&source, &disabled_refs) {
+                        Ok(report) => {
+                            for finding in &report.findings {
+                                aggregate.add(finding.clone());
+                            }
+                            per_file.push((source_path.clone(), report));
+                        }
+                        Err(_) => {
+                            eprintln!("Error auditing source: Failed to parse Rust source");
                             process::exit(1);
                         }
                     }
+                    continue;
                 }
-            }
 
-            // When the `plugins` feature is enabled, link the reference example
-            // rule into the registry. Off by default → identical behavior.
-            #[cfg(feature = "plugins")]
-            sdkt_audit_example_rule::register();
+                match sdkt_audit::scan_all_functions_str(&source) {
+                    Some(scans) => {
+                        let ctx = sdkt_audit::AuditContext { spec: None };
+                        let mut report = sdkt_audit::AuditReport::default();
+                        local_reg.run_all(&scans, &ctx, &disabled_refs, &mut report);
 
-            let disabled_refs: Vec<&str> = disable.iter().map(String::as_str).collect();
-            let audit_result = sdkt_audit::audit_source_with(&src, &disabled_refs);
-            match audit_result {
-                Ok(report) => {
-                    if audit_fmt == AuditFormat::Sarif {
-                        // Collect rule metadata for the SARIF rules section.
-                        let rules_info: Vec<sdkt_audit::RuleInfo> = sdkt_audit::all_rules()
-                            .iter()
-                            .map(|r| sdkt_audit::RuleInfo {
-                                id: r.id().to_string(),
-                                severity: r.severity(),
-                                description: r.description().to_string(),
-                            })
-                            .collect();
-                        // Path-to-URI normalisation (backslash→slash, drive
-                        // strip, percent-encoding) is handled entirely inside
-                        // sdkt_audit::sarif so the raw CLI path is passed
-                        // through unchanged.
-                        let sarif_str = sdkt_audit::report_to_sarif_string(
-                            &report,
-                            &path,
-                            sdkt_version_string(),
-                            &rules_info,
-                        )?;
-                        println!("{}", sarif_str);
-                    } else if audit_fmt == AuditFormat::Json {
-                        println!("{}", serde_json::to_string(&report)?);
-                    } else {
-                        println!("Static Analysis Report: {}", path);
-                        if loaded_plugins > 0 {
-                            println!(
-                                "Rules loaded: 5 built-in, {} plugin{}",
-                                loaded_plugins,
-                                if loaded_plugins == 1 { "" } else { "s" }
-                            );
-                        }
-                        println!(
-                            "Severity: {} critical, {} warning, {} info ({} total)",
-                            report.summary.critical,
-                            report.summary.warning,
-                            report.summary.info,
-                            report.summary.total
-                        );
-                        if report.is_clean() {
-                            println!("No issues found.");
-                        } else {
-                            println!();
-                            for f in &report.findings {
-                                let loc = f
-                                    .location
-                                    .as_ref()
-                                    .map(|l| format!(" [{}]", l))
-                                    .unwrap_or_default();
-                                println!("  [{}] {} {}: {}", f.severity, f.rule_id, loc, f.message);
+                        if multi_file {
+                            for finding in &mut report.findings {
+                                finding.file = Some(source_path.display().to_string());
                             }
                         }
+
+                        for finding in &report.findings {
+                            aggregate.add(finding.clone());
+                        }
+
+                        per_file.push((source_path.clone(), report));
+                    }
+                    None => {
+                        let e = "Failed to parse Rust source";
+                        if single_file {
+                            eprintln!("Error auditing source: {}", e);
+                            process::exit(1);
+                        }
+
+                        had_file_errors = true;
+
+                        let finding = sdkt_audit::Finding {
+                            rule_id: "AUDIT-PARSE".to_string(),
+                            severity: sdkt_audit::Severity::Critical,
+                            message: format!("Failed to audit source: {}", e),
+                            location: None,
+                            file: Some(source_path.display().to_string()),
+                        };
+
+                        let mut report = sdkt_audit::AuditReport::default();
+                        report.add(finding.clone());
+
+                        aggregate.add(finding);
+                        per_file.push((source_path.clone(), report));
                     }
                 }
-                Err(e) => {
-                    eprintln!("Error auditing source: {}", e);
-                    process::exit(1);
+            }
+            if audit_fmt == AuditFormat::Sarif {
+                let rules_info: Vec<sdkt_audit::RuleInfo> = sdkt_audit::all_rules()
+                    .iter()
+                    .map(|r| sdkt_audit::RuleInfo {
+                        id: r.id().to_string(),
+                        severity: r.severity(),
+                        description: r.description().to_string(),
+                    })
+                    .collect();
+                if multi_file {
+                    let sarif_str = sdkt_audit::sarif::report_to_sarif_string_multi_file(
+                        &aggregate,
+                        sdkt_version_string(),
+                        &rules_info,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    println!("{}", sarif_str);
+                } else {
+                    let source_file = paths[0].as_str();
+                    let sarif_str = sdkt_audit::sarif::report_to_sarif_string(
+                        &aggregate,
+                        source_file,
+                        sdkt_version_string(),
+                        &rules_info,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    println!("{}", sarif_str);
                 }
+                return Ok(());
+            }
+
+            if fmt == OutputFormat::Json {
+                if multi_file {
+                    #[derive(serde::Serialize)]
+                    struct MultiFileAuditReport {
+                        files: Vec<serde_json::Value>,
+                        summary: sdkt_audit::AuditSummary,
+                    }
+
+                    let files = per_file
+                        .iter()
+                        .map(|(path, report)| {
+                            serde_json::json!({
+                                "file": path.display().to_string(),
+                                "report": report,
+                            })
+                        })
+                        .collect();
+
+                    println!(
+                        "{}",
+                        serde_json::to_string(&MultiFileAuditReport {
+                            files,
+                            summary: aggregate.summary.clone(),
+                        })?
+                    );
+                } else {
+                    println!("{}", serde_json::to_string(&aggregate)?);
+                }
+            } else {
+                for (path, report) in &per_file {
+                    println!("Static Analysis Report: {}", path.display());
+
+                    if loaded_plugins > 0 {
+                        println!(
+                            "Rules loaded: 5 built-in, {} plugin{}",
+                            loaded_plugins,
+                            if loaded_plugins == 1 { "" } else { "s" }
+                        );
+                    }
+
+                    println!(
+                        "Severity: {} critical, {} warning, {} info ({} total)",
+                        report.summary.critical,
+                        report.summary.warning,
+                        report.summary.info,
+                        report.summary.total
+                    );
+
+                    if report.is_clean() {
+                        println!("No issues found.");
+                    } else {
+                        println!();
+                        for f in &report.findings {
+                            let loc = f
+                                .location
+                                .as_ref()
+                                .map(|l| format!(" [{}]", l))
+                                .unwrap_or_default();
+                            println!("  [{}] {} {}: {}", f.severity, f.rule_id, loc, f.message);
+                        }
+                    }
+
+                    println!();
+                }
+
+                if multi_file {
+                    println!(
+                        "Aggregate Severity: {} critical, {} warning, {} info ({} total)",
+                        aggregate.summary.critical,
+                        aggregate.summary.warning,
+                        aggregate.summary.info,
+                        aggregate.summary.total
+                    );
+                }
+            }
+            if had_file_errors {
+                process::exit(1);
             }
         }
         Commands::Wasm { action, net } => match action {
@@ -5689,6 +6139,19 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("Public Key: {}", identity.public_key);
                 }
                 IdentityAction::Import { name, secret } => {
+                    // `-` means: read the secret from stdin. A secret passed on
+                    // argv is visible to any process listing on the machine;
+                    // piping it in is the CI-safe path.
+                    let secret = if secret == "-" {
+                        use std::io::Read;
+                        let mut buf = String::new();
+                        std::io::stdin()
+                            .read_to_string(&mut buf)
+                            .map_err(|e| format!("Failed to read secret from stdin: {e}"))?;
+                        buf.trim().to_string()
+                    } else {
+                        secret
+                    };
                     let identity = store.import(&name, &secret)?;
                     println!("Identity '{}' imported successfully.", identity.name);
                     println!("Public Key: {}", identity.public_key);
@@ -5768,133 +6231,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Network { action } => {
-            use sdkt_storage::{NetworkProfile, NetworkStore};
-            let store = NetworkStore::new()?;
-            match action {
-                NetworkAction::Add {
-                    name,
-                    rpc_url,
-                    passphrase,
-                    friendbot,
-                    description,
-                    format,
-                } => {
-                    let fmt = parse_format_str(&format);
-                    let mut profile = NetworkProfile::new(name.clone(), rpc_url, passphrase);
-                    if let Some(url) = friendbot {
-                        profile = profile.with_friendbot(url);
-                    }
-                    if let Some(desc) = description {
-                        profile = profile.with_description(desc);
-                    }
-                    store.add(profile)?;
-                    if fmt == OutputFormat::Json {
-                        println!("{}", serde_json::to_string(&store.get(&name)?)?);
-                    } else {
-                        println!("Network profile '{}' saved.", name);
-                    }
-                }
-                NetworkAction::List { format } => {
-                    let fmt = parse_format_str(&format);
-                    let profiles = store.list()?;
-                    if fmt == OutputFormat::Json {
-                        println!("{}", serde_json::to_string(&profiles)?);
-                    } else if profiles.is_empty() {
-                        println!("No network profiles found.");
-                    } else {
-                        println!("Network profiles:");
-                        for p in profiles {
-                            println!("  {} ({})", p.name, p.rpc_url);
-                        }
-                    }
-                }
-                NetworkAction::Show { name, format } => {
-                    let fmt = parse_format_str(&format);
-                    let profile = store.get(&name)?;
-                    if fmt == OutputFormat::Json {
-                        println!("{}", serde_json::to_string(&profile)?);
-                    } else {
-                        println!("Network profile: {}", profile.name);
-                        println!("  RPC URL:         {}", profile.rpc_url);
-                        println!("  Passphrase:      {}", profile.network_passphrase);
-                        if let Some(url) = &profile.friendbot_url {
-                            println!("  Friendbot URL:   {}", url);
-                        }
-                        if let Some(desc) = &profile.description {
-                            println!("  Description:     {}", desc);
-                        }
-                    }
-                }
-                NetworkAction::Remove { name, format } => {
-                    let fmt = parse_format_str(&format);
-                    store.remove(&name)?;
-                    if fmt == OutputFormat::Json {
-                        let json = serde_json::json!({
-                            "status": "removed",
-                            "name": name,
-                        });
-                        println!("{}", serde_json::to_string(&json)?);
-                    } else {
-                        println!("Network profile '{}' removed.", name);
-                    }
-                }
-                NetworkAction::Check { name, format } => {
-                    let fmt = parse_format_str(&format);
-
-                    // Resolve through the same precedence path every other
-                    // network-aware command uses. `Check` is strictly
-                    // read-only: the stored profile is never written back.
-                    let cfg = match resolve_network_config(None, None, Some(name.clone())) {
-                        Ok(cfg) => cfg,
-                        Err(e) => {
-                            eprintln!("Error: {}", e);
-                            process::exit(1);
-                        }
-                    };
-
-                    let outcome = probe_network_profile(&name, &cfg).await;
-
-                    if fmt == OutputFormat::Json {
-                        println!("{}", serde_json::to_string(&outcome)?);
-                    } else if outcome.is_healthy() {
-                        println!("Network profile '{}' is reachable.", outcome.profile);
-                        println!("  RPC URL:          {}", outcome.rpc_url);
-                        println!(
-                            "  Status:           {}",
-                            outcome.status.as_deref().unwrap_or("unknown")
-                        );
-                        if let Some(seq) = outcome.latest_ledger {
-                            println!("  Latest ledger:    {}", seq);
-                        }
-                        if let Some(protocol) = outcome.protocol_version {
-                            println!("  Protocol version: {}", protocol);
-                        }
-                    } else {
-                        if outcome.reachable {
-                            println!(
-                                "Network profile '{}' is reachable but not healthy.",
-                                outcome.profile
-                            );
-                        } else {
-                            println!("Network profile '{}' is NOT reachable.", outcome.profile);
-                        }
-                        println!("  RPC URL:          {}", outcome.rpc_url);
-                        if let Some(seq) = outcome.latest_ledger {
-                            println!("  Latest ledger:    {}", seq);
-                        }
-                        if let Some(protocol) = outcome.protocol_version {
-                            println!("  Protocol version: {}", protocol);
-                        }
-                        if let Some(err) = &outcome.error {
-                            println!("  Error:            {}", err);
-                        }
-                    }
-
-                    if !outcome.is_healthy() {
-                        process::exit(1);
-                    }
-                }
-            }
+            commands::network::run_network_action(action).await?;
         }
         Commands::Init {
             name,
@@ -5944,6 +6281,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Deploy {
             wasm,
+            wasm_hash,
             salt,
             show_address,
             dry_run,
@@ -5955,6 +6293,52 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             net,
         } => {
             let fmt = parse_format_str(&format);
+
+            // Exactly one code source: --wasm (upload + create) or --wasm-hash
+            // (create-only from already-uploaded code). Validate before any I/O.
+            match (wasm.is_some(), wasm_hash.is_some()) {
+                (true, true) => return Err("specify only one of --wasm or --wasm-hash".into()),
+                (false, false) => {
+                    return Err("provide either --wasm <FILE> or --wasm-hash <HASH>".into())
+                }
+                _ => {}
+            }
+            // --deny-breaking diffs two WASM binaries, so it needs the new WASM
+            // file; it is meaningless on the create-only --wasm-hash path.
+            if deny_breaking && wasm_hash.is_some() {
+                return Err(
+                    "--deny-breaking compares WASM binaries and cannot be used with --wasm-hash"
+                        .into(),
+                );
+            }
+            if wasm_hash.is_some() && (dry_run || show_address) {
+                return Err(
+                    "--dry-run and --show-address are not supported with --wasm-hash".into(),
+                );
+            }
+
+            // Local helper: parse 40-character hex into a 20-byte salt; validate strictly
+            fn parse_salt_hex(s: &str) -> Result<[u8; 20], String> {
+                let sh = s.trim();
+                if sh.len() != 40 {
+                    return Err(format!(
+                        "Invalid --salt: must be 20-byte hex (40 hex chars), got length {}",
+                        sh.len()
+                    ));
+                }
+                if let Some(pos) = sh.chars().position(|c| !c.is_ascii_hexdigit()) {
+                    return Err(format!(
+                        "Invalid --salt: character at index {} is not a hex digit",
+                        pos
+                    ));
+                }
+                let mut out = [0u8; 20];
+                for i in 0..20 {
+                    out[i] = u8::from_str_radix(&sh[i * 2..i * 2 + 2], 16)
+                        .map_err(|e| format!("Invalid --salt hex at byte {}: {}", i, e))?;
+                }
+                Ok(out)
+            }
 
             // Resolve network config FIRST for safety guard
             let network_config = resolve_network_config(
@@ -5991,16 +6375,29 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             sdkt_xdr::parse_scval_args(&parsed_args)
                 .map_err(|e| format!("Invalid constructor argument: {}", e))?;
 
-            // Optional deploy guard: abort on a backwards-incompatible upgrade.
+            // Read the new WASM before looking up the identity. This preserves
+            // the fail-fast behavior for a missing or unreadable file on the
+            // full-deploy path; create-only recovery does not need a file.
+            let preloaded_wasm = wasm
+                .as_ref()
+                .map(|path| {
+                    fs::read(path).map_err(|e| format!("Error reading WASM file {}: {}", path, e))
+                })
+                .transpose()?;
+
+            // The upgrade-safety check only needs the two local WASM files and
+            // must run before identity lookup so incompatible upgrades fail
+            // deterministically even without a configured identity.
             if deny_breaking {
-                let baseline = old_wasm.ok_or_else(|| {
+                let baseline = old_wasm.as_ref().ok_or_else(|| {
                     "The --deny-breaking flag requires --old-wasm <deployed.wasm> (the currently deployed contract)".to_string()
                 })?;
-                let old_bytes = fs::read(&baseline)
+                let old_bytes = fs::read(baseline)
                     .map_err(|e| format!("Failed to read OLD WASM '{}': {}", baseline, e))?;
-                let new_bytes = fs::read(&wasm)
-                    .map_err(|e| format!("Failed to read NEW WASM '{}': {}", wasm, e))?;
-                match sdkt_wasm::upgrade_safety_wasm(&old_bytes, &new_bytes) {
+                let new_bytes = preloaded_wasm
+                    .as_ref()
+                    .expect("full-deploy path preloads the new WASM");
+                match sdkt_wasm::upgrade_safety_wasm(&old_bytes, new_bytes) {
                     Ok(verdict) => {
                         if !verdict.compatible {
                             eprintln!("Deployment aborted: upgrade is NOT backwards-compatible.");
@@ -6018,88 +6415,106 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // Read WASM file
-            let wasm_bytes =
-                fs::read(&wasm).map_err(|e| format!("Error reading WASM file {}: {}", wasm, e))?;
-
-            // Load identity for signing
+            // Load identity for signing (shared by both code sources). The
+            // `--identity` flag defaults to the reserved "default" sentinel, so
+            // resolve it to the configured default identity.
             let identity_store = sdkt_storage::IdentityStore::new()
                 .map_err(|e| format!("Failed to access identity store: {}", e))?;
             let identity_obj = identity_store
-                .get(&identity)
-                .map_err(|e| format!("Identity '{}' not found: {}", identity, e))?;
-
-            // Load signing key from storage
+                .resolve_signing_identity(&identity)
+                .map_err(|e| format!("Failed to resolve signing identity: {}", e))?;
             let signing_key = identity_store
-                .load_signing_key(&identity)
-                .map_err(|e| format!("Failed to load signing key for '{}': {}", identity, e))?;
+                .load_signing_key(&identity_obj.name)
+                .map_err(|e| {
+                    format!(
+                        "Failed to load signing key for '{}': {}",
+                        identity_obj.name, e
+                    )
+                })?;
             let signer = sdkt_xdr::sign::Ed25519Signer::from_seed(&signing_key.to_bytes());
 
             let client = SorobanRpcClient::from_config(&network_config);
-
             // Source account is the identity's public key
             let source_account = identity_obj.public_key.clone();
 
-            // Contract IDs are deterministic. Calculate the prediction from
-            // local inputs before making any RPC call, so --dry-run remains
-            // entirely offline.
-            let prediction_salt = if show_address || dry_run {
-                Some(salt_bytes.unwrap_or_else(sdkt_rpc::deploy::generate_salt))
-            } else {
-                salt_bytes
-            };
-            let predicted = if let Some(prediction_salt) = prediction_salt {
-                let wasm_hash: [u8; 32] = Sha256::digest(&wasm_bytes).into();
-                let contract_id = sdkt_xdr::derive_contract_id(
-                    &network.network_id(),
+            let outcome_result = if let Some(hash) = wasm_hash.as_ref() {
+                // Create-only: deploy from already-uploaded code; no upload step.
+                sdkt_rpc::deploy_contract_from_hash(
+                    &client,
+                    hash,
                     &source_account,
-                    &prediction_salt,
-                    &wasm_hash,
+                    &signer,
+                    network,
+                    salt_bytes,
+                    parsed_args,
                 )
-                .map_err(|e| format!("Failed to derive predicted contract ID: {}", e))?;
-                Some((contract_id, hex::encode(wasm_hash), prediction_salt))
+                .await
             } else {
-                None
+                // Full deploy from a WASM file (present per the mutual-exclusion
+                // check above).
+                let wasm_bytes = preloaded_wasm
+                    .as_ref()
+                    .expect("full-deploy path preloads the WASM");
+
+                // Contract IDs are deterministic. Calculate the prediction
+                // only for the full-WASM path; hash-only recovery already
+                // delegates its address handling to the RPC helper.
+                let prediction_salt = if show_address || dry_run {
+                    Some(salt_bytes.unwrap_or_else(sdkt_rpc::deploy::generate_salt))
+                } else {
+                    salt_bytes
+                };
+                let predicted = if let Some(prediction_salt) = prediction_salt {
+                    let wasm_digest: [u8; 32] = Sha256::digest(wasm_bytes).into();
+                    let contract_id = sdkt_xdr::derive_contract_id(
+                        &network.network_id(),
+                        &source_account,
+                        &prediction_salt,
+                        &wasm_digest,
+                    )
+                    .map_err(|e| format!("Failed to derive predicted contract ID: {}", e))?;
+                    Some((contract_id, hex::encode(wasm_digest), prediction_salt))
+                } else {
+                    None
+                };
+                if let Some((contract_id, wasm_hash, prediction_salt)) = &predicted {
+                    if dry_run {
+                        if fmt == OutputFormat::Json {
+                            println!(
+                                "{}",
+                                serde_json::json!({
+                                    "status": "dry_run",
+                                    "contractId": contract_id,
+                                    "wasmHash": wasm_hash,
+                                    "salt": hex::encode(prediction_salt),
+                                    "submitted": false,
+                                })
+                            );
+                        } else {
+                            println!("Predicted Contract ID: {}", contract_id);
+                            println!("WASM Hash: {}", wasm_hash);
+                            println!("Salt: {}", hex::encode(prediction_salt));
+                            println!("No transactions submitted.");
+                        }
+                        return Ok(());
+                    }
+                    eprintln!("Predicted Contract ID: {}", contract_id);
+                    eprintln!("WASM Hash: {}", wasm_hash);
+                    eprintln!("Salt: {}", hex::encode(prediction_salt));
+                }
+                sdkt_rpc::deploy_contract_with_args(
+                    &client,
+                    wasm_bytes,
+                    &source_account,
+                    &signer,
+                    network,
+                    prediction_salt,
+                    parsed_args,
+                )
+                .await
             };
 
-            if let Some((contract_id, wasm_hash, prediction_salt)) = &predicted {
-                if dry_run {
-                    if fmt == OutputFormat::Json {
-                        println!(
-                            "{}",
-                            serde_json::json!({
-                                "status": "dry_run",
-                                "contractId": contract_id,
-                                "wasmHash": wasm_hash,
-                                "salt": hex::encode(prediction_salt),
-                                "submitted": false,
-                            })
-                        );
-                    } else {
-                        println!("Predicted Contract ID: {}", contract_id);
-                        println!("WASM Hash: {}", wasm_hash);
-                        println!("Salt: {}", hex::encode(prediction_salt));
-                        println!("No transactions submitted.");
-                    }
-                    return Ok(());
-                }
-                eprintln!("Predicted Contract ID: {}", contract_id);
-                eprintln!("WASM Hash: {}", wasm_hash);
-                eprintln!("Salt: {}", hex::encode(prediction_salt));
-            }
-
-            use sdkt_rpc::deploy_contract_with_args;
-            match deploy_contract_with_args(
-                &client,
-                &wasm_bytes,
-                &source_account,
-                &signer,
-                network,
-                prediction_salt,
-                parsed_args,
-            )
-            .await
-            {
+            match outcome_result {
                 Ok(outcome) => match &outcome {
                     sdkt_rpc::DeployOutcome::Success(res) => {
                         if fmt == OutputFormat::Json {
@@ -6192,6 +6607,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 contract_id: contract_id.clone(),
                 function: function.clone(),
                 args: parsed_args,
+                memo: None,
             };
 
             let envelope = sdkt_xdr::builder::build_invoke_transaction(&params)?;
@@ -6344,15 +6760,22 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 other => Network::Custom(other.to_string()),
             };
 
-            // 2. Load the signing identity (keystore; no secret on argv).
+            // 2. Load the signing identity (keystore; no secret on argv). The
+            //    `--identity` flag defaults to the reserved "default" sentinel,
+            //    which resolves to the configured default identity.
             let identity_store = sdkt_storage::IdentityStore::new()
                 .map_err(|e| format!("Failed to access identity store: {e}"))?;
             let identity_obj = identity_store
-                .get(&identity)
-                .map_err(|e| format!("Identity '{}' not found: {e}", identity))?;
+                .resolve_signing_identity(&identity)
+                .map_err(|e| format!("Failed to resolve signing identity: {e}"))?;
             let signing_key = identity_store
-                .load_signing_key(&identity)
-                .map_err(|e| format!("Failed to load signing key for '{}': {e}", identity))?;
+                .load_signing_key(&identity_obj.name)
+                .map_err(|e| {
+                    format!(
+                        "Failed to load signing key for '{}': {e}",
+                        identity_obj.name
+                    )
+                })?;
             let signer = Ed25519Signer::from_seed(&signing_key.to_bytes());
 
             // 3. Parse typed args (shared parser; strict — typos must not be
@@ -6369,6 +6792,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 contract_id: contract_id.clone(),
                 function: function.clone(),
                 args: parsed_args,
+                memo: None,
             };
 
             let client = SorobanRpcClient::from_config(&network_config);
@@ -6948,6 +7372,87 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
         Commands::Project { action, net } => match action {
+            ProjectCommand::Status { format } => {
+                let fmt = parse_format_str(&format);
+                let network_config = match resolve_network_config(
+                    net.rpc_url.clone(),
+                    net.network_passphrase.clone(),
+                    net.network_profile.clone(),
+                ) {
+                    Ok(config) => config,
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        process::exit(1);
+                    }
+                };
+                let network_key = sdkt_core::deployment::network_key(
+                    if net.network_passphrase.is_some() {
+                        None
+                    } else {
+                        net.network_profile.as_deref()
+                    },
+                    &network_config.passphrase,
+                );
+                let record_path = Path::new(sdkt_core::deployment::DEPLOYMENT_RECORD_FILE);
+                let record_file =
+                    match sdkt_core::deployment::DeploymentRecordFile::read(record_path) {
+                        Ok(file) => file,
+                        Err(e) => {
+                            eprintln!("Error: {}", e);
+                            process::exit(1);
+                        }
+                    };
+                let mut deployments: Vec<_> = record_file
+                    .records_for(&network_key)
+                    .into_iter()
+                    .flat_map(|records| records.iter())
+                    .collect();
+                deployments.sort_by_key(|(alias, _)| *alias);
+
+                if fmt == OutputFormat::Json {
+                    let deployments: Vec<_> = deployments
+                        .into_iter()
+                        .map(|(alias, record)| {
+                            serde_json::json!({
+                                "alias": alias,
+                                "contract_id": record.contract_id,
+                                "wasm_hash": record.wasm_hash,
+                                "network": record.network,
+                                "timestamp": record.timestamp,
+                                "salt": record.salt,
+                            })
+                        })
+                        .collect();
+                    let status = if deployments.is_empty() {
+                        "no_deployments"
+                    } else {
+                        "deployed"
+                    };
+                    println!(
+                        "{}",
+                        serde_json::to_string(&serde_json::json!({
+                            "status": status,
+                            "network": network_key,
+                            "deployments": deployments,
+                        }))
+                        .unwrap()
+                    );
+                } else if deployments.is_empty() {
+                    println!("No deployments recorded for network '{}'.", network_key);
+                } else {
+                    println!("Project deployment status (network: {}):", network_key);
+                    for (alias, record) in deployments {
+                        println!("  {}", alias);
+                        println!("    Contract ID: {}", record.contract_id);
+                        println!("    WASM hash:   {}", record.wasm_hash);
+                        println!("    Recorded network: {}", record.network);
+                        println!("    Timestamp:  {}", record.timestamp);
+                        if let Some(salt) = &record.salt {
+                            println!("    Salt:       {}", salt);
+                        }
+                    }
+                }
+            }
             ProjectCommand::Deploy {
                 salt,
                 skip_deployed,
@@ -7022,15 +7527,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 // contract — and avoids a redundant store lookup per iteration.
                 let identity_store = sdkt_storage::IdentityStore::new()
                     .map_err(|e| format!("Failed to access identity store: {}", e))?;
-                let identity_obj = if identity == "default" {
-                    identity_store
-                        .get_default()
-                        .map_err(|e| format!("Default identity not found: {}", e))?
-                } else {
-                    identity_store
-                        .get(&identity)
-                        .map_err(|e| format!("Identity '{}' not found: {}", identity, e))?
-                };
+                let identity_obj = identity_store
+                    .resolve_signing_identity(&identity)
+                    .map_err(|e| format!("Failed to resolve signing identity: {}", e))?;
                 let signing_key = identity_store
                     .load_signing_key(&identity_obj.name)
                     .map_err(|e| format!("Failed to load signing key: {}", e))?;
@@ -7686,6 +8185,79 @@ fn run_generate_client(
         None => print!("{}", code),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod events_topic_unit_tests {
+    use super::*;
+    use sdkt_wasm::ContractSpec;
+
+    fn spec_with_events(events: &[(&str, &[&str])]) -> ContractSpec {
+        ContractSpec {
+            env_meta: None,
+            functions: vec![],
+            custom_types: vec![],
+            events: events
+                .iter()
+                .map(|(name, prefix)| sdkt_wasm::spec::ContractEvent {
+                    name: name.to_string(),
+                    doc: String::new(),
+                    prefix_topics: prefix.iter().map(|p| p.to_string()).collect(),
+                    params: vec![],
+                    data_format: "single_value".to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn wire_topic_produces_no_warning() {
+        // Prefix topic is the wire topic; an event without prefix falls back to its name.
+        let spec = spec_with_events(&[("Transfer", &["transfer"]), ("Approval", &[])]);
+        assert_eq!(unknown_event_topic_warning(&spec, "transfer"), None);
+        assert_eq!(unknown_event_topic_warning(&spec, "Approval"), None);
+    }
+
+    #[test]
+    fn abi_name_differing_from_prefix_suggests_prefix() {
+        let spec = spec_with_events(&[("Transfer", &["transfer"])]);
+        let w = unknown_event_topic_warning(&spec, "Transfer").expect("warning");
+        assert!(w.contains("'Transfer' is the ABI name of an event"), "{w}");
+        assert!(
+            w.contains("did you mean 'transfer'? (the wire topic is the prefix topic)"),
+            "{w}"
+        );
+        assert!(w.ends_with("Querying anyway."), "{w}");
+    }
+
+    #[test]
+    fn abi_name_equal_to_prefix_produces_no_warning() {
+        let spec = spec_with_events(&[("transfer", &["transfer"])]);
+        assert_eq!(unknown_event_topic_warning(&spec, "transfer"), None);
+    }
+
+    #[test]
+    fn unknown_symbol_warns_and_lists_wire_topics() {
+        let spec = spec_with_events(&[("Transfer", &["transfer"]), ("Approval", &[])]);
+        let w = unknown_event_topic_warning(&spec, "Mint").expect("warning");
+        assert!(w.contains("'Mint' is not declared"), "{w}");
+        assert!(w.contains("declared: transfer, Approval."), "{w}");
+        assert!(!w.contains("did you mean"), "{w}");
+    }
+
+    #[test]
+    fn case_mismatch_suggests_exact_symbol() {
+        let spec = spec_with_events(&[("Approval", &["approval"])]);
+        let w = unknown_event_topic_warning(&spec, "APPROVAL").expect("warning");
+        assert!(w.contains("did you mean 'approval'?"), "{w}");
+    }
+
+    #[test]
+    fn spec_without_events_warns() {
+        let spec = spec_with_events(&[]);
+        let w = unknown_event_topic_warning(&spec, "Transfer").expect("warning");
+        assert!(w.contains("the ABI declares no events"), "{w}");
+    }
 }
 
 #[cfg(test)]

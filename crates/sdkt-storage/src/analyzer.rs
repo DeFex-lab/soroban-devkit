@@ -1,12 +1,9 @@
 use crate::error::StorageError;
+use crate::snapshot::EXPIRING_SOON_LEDGERS;
 use crate::types::{StorageClass, StorageEntry, StorageReport, TtlInfoSummary};
 use base64::Engine;
 use sdkt_rpc::SorobanRpcClient;
 use stellar_xdr::{ContractDataDurability, LedgerKey, ReadXdr, ScVal};
-
-/// Threshold (in ledgers) below which an entry is considered "expiring soon".
-/// ~1 day at 5s/ledger (17280 ledgers).
-const EXPIRING_SOON_LEDGERS: u32 = 17280;
 
 /// Classify a storage entry from its base64 XDR `LedgerKey`.
 ///
@@ -121,6 +118,7 @@ impl StorageAnalyzer {
 
             detailed.push(StorageEntry {
                 key: entry.key.clone(),
+                label: None,
                 class,
                 current_ttl: entry.current_ttl,
                 days_remaining: entry.days_remaining,

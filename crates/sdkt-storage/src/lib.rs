@@ -15,10 +15,11 @@ pub use estimate::{
     StorageClassesEstimate, StorageCostEstimate, TotalEstimate, DEFAULT_ESTIMATE_LEDGERS,
     STROOPS_PER_XLM,
 };
-pub use identity::{Identity, IdentityStore};
+pub use identity::{Identity, IdentityStore, DEFAULT_IDENTITY_NAME};
 pub use network::{NetworkProfile, NetworkStore};
 pub use snapshot::{
-    capture_snapshot, diff_snapshots, SnapshotDiff, SnapshotEntry, StorageSnapshot, TtlDelta,
-    ValueDelta,
+    capture_snapshot, derive_extend_plan, diff_snapshots, DiffEntry, DiffStatus, ExtendPlan,
+    SnapshotDiff, SnapshotEntry, StorageSnapshot, TtlDelta, ValueDelta,
+    DEFAULT_SUGGESTED_LEDGERS, EXPIRING_SOON_LEDGERS,
 };
 pub use types::{StorageClass, StorageEntry, StorageReport, TtlInfoSummary};
