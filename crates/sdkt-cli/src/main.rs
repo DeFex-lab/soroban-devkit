@@ -13,8 +13,7 @@ use sdkt_rpc::{
 };
 use sdkt_storage::WasmCache;
 use sdkt_storage::{
-    capture_snapshot, diff_snapshots, NetworkProfile, NetworkStore, SnapshotDiff, StorageAnalyzer,
-    StorageSnapshot, DEFAULT_SUGGESTED_LEDGERS, EXPIRING_SOON_LEDGERS,
+    NetworkStore, StorageAnalyzer, DEFAULT_SUGGESTED_LEDGERS, EXPIRING_SOON_LEDGERS,
 };
 use sdkt_wasm::spec::parse_contract_spec;
 use sdkt_xdr::abi_decode::decode_event_topics;
@@ -181,13 +180,14 @@ enum Commands {
     },
     /// Encode typed values (TYPE:VALUE) to base64 XDR (reverse of decode)
     Encode {
-        /// One typed value: u32, i32, u64, i64, u128, i128, bool, string, symbol, bytes, or address.
-        /// Examples: u128:1000000 i128:-1000 bytes:deadbeef
+        /// One typed value: u32, i32, u64, i64, timepoint, duration, u128, i128, bool, string, symbol, bytes, or address.
+        /// Examples: u128:1000000 timepoint:1758000000 duration:86400 bytes:deadbeef
         ///
         /// Or json:<JSON> to encode ONE composite value (json:[1,2,3] is a single Vec):
         /// array -> Vec, object -> Map with String keys, null -> Void, bool -> Bool,
         /// string -> String, integer -> smallest of u32/u64 (or i32/i64 if negative).
         /// Floats are rejected. Example: json:'[{"alice":"100"},{"bob":"250"}]'
+
         #[arg(value_name = "TYPE:VALUE", num_args = 1..)]
         values: Vec<String>,
     },
@@ -341,6 +341,17 @@ enum Commands {
         /// Emit an upgrade-safety verdict (breaking vs non-breaking changes)
         #[arg(long, default_value_t = false)]
         upgrade_safety: bool,
+        /// Fail when the candidate grows more than N percent over the old
+        /// artifact (e.g. `--max-growth-pct 10`). Operator-supplied policy:
+        /// SDKT never assumes a network limit. Requires `--old-wasm` (always
+        /// present for `diff`). Violation exits non-zero.
+        #[arg(long, value_name = "N")]
+        max_growth_pct: Option<f64>,
+        /// Fail when the candidate artifact exceeds N bytes (e.g.
+        /// `--max-size-bytes 131072`). Operator-supplied policy; not a
+        /// hardcoded network limit. Violation exits non-zero.
+        #[arg(long, value_name = "N")]
+        max_size_bytes: Option<u64>,
     },
     /// Static security analysis of a Soroban contract source file (Gap C)
     Audit {
@@ -363,6 +374,14 @@ enum Commands {
         /// Skip loading installed plugins automatically from the plugin store
         #[arg(long, default_value_t = false)]
         no_plugins: bool,
+        /// Path to a contract WASM for spec-correlated analysis.
+        #[arg(long, value_name = "WASM")]
+        abi: Option<String>,
+        /// Contract ID whose deployed WASM should provide the ABI.
+        #[arg(long, value_name = "CONTRACT_ID")]
+        abi_contract: Option<String>,
+        #[command(flatten)]
+        net: NetworkArgs,
     },
     /// Manage Soroban identities (keys)
     Identity {
@@ -373,6 +392,36 @@ enum Commands {
     Network {
         #[command(subcommand)]
         action: NetworkAction,
+    },
+    /// Read-only deployment verification: is the deployed contract the
+    /// artifact I built?
+    ///
+    /// Compares a local WASM's offline SHA-256 against the deployed
+    /// contract's executable, obtained by a raw ledger probe (no inspection
+    /// shortcuts, no bytecode download). Verdicts: MATCH, DRIFT, UNKNOWN,
+    /// NOT_FOUND. Never signs, submits, or deploys.
+    DeploymentVerify {
+        /// Stellar contract ID (C...)
+        #[arg(short, long, value_name = "CONTRACT_ID")]
+        contract: String,
+        /// Path to a local WASM file to compare against the on-chain code
+        #[arg(long, value_name = "WASM")]
+        wasm: Option<String>,
+        /// Network to verify against (testnet | mainnet | futurenet)
+        #[arg(
+            short,
+            long,
+            value_name = "NETWORK",
+            conflicts_with = "rpc_url",
+            conflicts_with = "network_profile",
+            conflicts_with = "network_passphrase"
+        )]
+        network: Option<String>,
+        /// Output format
+        #[arg(short, long, default_value = "pretty")]
+        format: String,
+        #[command(flatten)]
+        net: NetworkArgs,
     },
     /// Initialize a new Soroban contract project
     Init {
@@ -429,7 +478,11 @@ enum Commands {
         net: NetworkArgs,
     },
     /// Compile Rust contracts into WASM artifacts
-    Build,
+    Build {
+        /// Output format (pretty or json)
+        #[arg(short, long, default_value = "pretty")]
+        format: String,
+    },
     /// Invoke a contract function (read-only, no signing/submission)
     Call {
         /// Stellar contract ID (C...)
@@ -507,6 +560,57 @@ enum Commands {
     Plugin {
         #[command(subcommand)]
         action: PluginAction,
+    },
+    /// Read-only release-assurance: artifact → security → upgrade safety →
+    /// deployed verification → contract health, aggregated into one release
+    /// status. Never signs, submits, extends TTL, or mutates any state.
+    ReleaseAssurance {
+        /// Candidate WASM artifact to assess (hash, spec, upgrade diff, audit)
+        #[arg(long, value_name = "WASM")]
+        wasm: String,
+        /// Previous (baseline) WASM for the offline upgrade-safety diff
+        #[arg(long, value_name = "WASM")]
+        previous_wasm: Option<String>,
+        /// Rust source file(s) or directory for the static security audit
+        /// (same engine and semantics as `sdkt audit`)
+        #[arg(long, value_name = "PATH", num_args = 1..)]
+        audit: Vec<String>,
+        /// Disable an audit rule by id (repeatable), e.g. --disable AUTH-001
+        #[arg(long, value_name = "RULE_ID", action = clap::ArgAction::Append)]
+        disable: Vec<String>,
+        /// Deployed contract ID (C...) for on-chain verification + health.
+        /// On-chain checks are skipped entirely when omitted.
+        #[arg(short, long, value_name = "CONTRACT_ID")]
+        contract: Option<String>,
+        /// Deployed network (testnet | mainnet | futurenet) for the on-chain
+        /// checks. Only required together with --contract.
+        #[arg(
+            short,
+            long,
+            value_name = "NETWORK",
+            conflicts_with = "rpc_url",
+            conflicts_with = "network_profile",
+            conflicts_with = "network_passphrase"
+        )]
+        network: Option<String>,
+        /// Output format (pretty or json)
+        #[arg(short, long, default_value = "pretty")]
+        format: String,
+        /// Fail (artifact section -> release FAIL, exit 1) when the candidate
+        /// artifact exceeds N bytes (e.g. `--max-size-bytes 131072`).
+        /// Operator-supplied policy; SDKT never hardcodes a network limit.
+        /// Violates when size > N; a size of exactly N passes.
+        #[arg(long, value_name = "N")]
+        max_size_bytes: Option<u64>,
+        /// Fail (artifact section -> release FAIL, exit 1) when the candidate
+        /// grew more than N percent over `--previous-wasm`. Requires
+        /// `--previous-wasm`; a request without it is an error, never a silent
+        /// skip. Violates when growth > N; exactly N passes. Growth is undefined
+        /// against a zero-byte baseline and is reported as such.
+        #[arg(long, value_name = "N")]
+        max_growth_pct: Option<f64>,
+        #[command(flatten)]
+        net: NetworkArgs,
     },
     /// Generate shell completion scripts for your shell
     Completions {
@@ -1037,54 +1141,6 @@ enum StorageAction {
         #[arg(short, long, default_value = "pretty")]
         format: String,
     },
-    /// Capture a contract's storage into a JSON snapshot document.
-    ///
-    /// Records each tracked ledger key's storage class, durability, remaining
-    /// TTL, estimated rent, and its captured value (base64 XDR `ScVal`). The
-    /// contract instance entry is always included; add more keys with
-    /// `--key-xdr` or the typed `--map-key`/`--key-arg` options.
-    Snapshot {
-        contract_id: String,
-        /// Repeatable: extra ledger keys (base64 XDR or hex XDR) to record.
-        #[arg(long, value_name = "BASE64_XDR", alias = "key")]
-        key_xdr: Vec<String>,
-        /// Leading symbol of a typed data key — the map/enum-variant name.
-        /// Combined with `--key-arg` this builds `ScVec[symbol, args...]`,
-        /// e.g. `--map-key balances --key-arg address:G...`.
-        #[arg(long, value_name = "SYMBOL")]
-        map_key: Option<String>,
-        /// Repeatable typed key component (`TYPE:VALUE`, e.g. `address:G...`,
-        /// `u32:100`) appended after `--map-key`. Requires `--map-key`.
-        #[arg(long, value_name = "TYPE:VALUE")]
-        key_arg: Vec<String>,
-        /// Durability of a typed data key: `persistent` (default) or `temporary`.
-        #[arg(
-            long,
-            value_name = "persistent|temporary",
-            default_value = "persistent"
-        )]
-        durability: String,
-        /// File to write the snapshot document to.
-        #[arg(short, long, value_name = "FILE")]
-        out: String,
-        #[arg(short, long, default_value = "pretty")]
-        format: String,
-    },
-    /// Diff a recorded snapshot against a fresh live read of the same contract.
-    ///
-    /// Reports a `value_changed` delta when a tracked entry's captured value
-    /// differs but its TTL did not, a `ttl_changed` delta when TTL/rent moved,
-    /// and `added`/`removed` keys. Snapshots captured before value capture
-    /// existed still diff against TTL/rent only.
-    Diff {
-        /// Snapshot document written by `sdkt storage snapshot`.
-        snapshot: String,
-        /// Contract ID to read live. Defaults to the snapshot's recorded contract.
-        #[arg(long, value_name = "CONTRACT_ID")]
-        contract: Option<String>,
-        #[arg(short, long, default_value = "pretty")]
-        format: String,
-    },
     /// Extend the TTL of a contract's footprint via `ExtendFootprintTtl`.
     Extend {
         /// Contract whose storage footprint should have TTL extended.
@@ -1281,12 +1337,18 @@ or confirm you are comparing the correct artifact."
 
     if expiring_soon > 0 {
         reasons.push(format!(
-            "{} storage entr{} expiring soon (< 30 days).",
+            "{} storage entr{} expiring soon (within ~{} day{}).",
             expiring_soon,
             if expiring_soon == 1 {
                 "y is"
             } else {
                 "ies are"
+            },
+            (u64::from(EXPIRING_SOON_LEDGERS) * 5).div_ceil(86_400),
+            if (u64::from(EXPIRING_SOON_LEDGERS) * 5).div_ceil(86_400) == 1 {
+                ""
+            } else {
+                "s"
             }
         ));
     }
@@ -1458,6 +1520,731 @@ async fn verify_contract(
         verification_status: status,
         explanation,
     })
+}
+
+// === release-assurance foundation: shared types + pure classifiers ===
+// (No new engine — reuses sdkt-wasm, sdkt-audit, verify_contract, contract_health.)
+
+/// Status of a single release-assurance check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "UPPERCASE")]
+enum RaStatus {
+    Pass,
+    Review,
+    Fail,
+    Skipped,
+    Error,
+}
+
+impl std::fmt::Display for RaStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            RaStatus::Pass => "PASS",
+            RaStatus::Review => "REVIEW",
+            RaStatus::Fail => "FAIL",
+            RaStatus::Skipped => "SKIPPED",
+            RaStatus::Error => "ERROR",
+        };
+        f.write_str(s)
+    }
+}
+
+/// A single check section: status + machine-readable detail.
+#[derive(Debug, serde::Serialize)]
+struct RaCheck {
+    status: RaStatus,
+    detail: String,
+}
+
+/// Result of an on-chain check: the existing engine's report, or a classified
+/// status paired with the engine's original error message.
+type OnChainResult<T> = Result<T, (RaStatus, String)>;
+
+/// Artifact section.
+#[derive(Debug, serde::Serialize)]
+struct ArtifactResult {
+    #[serde(flatten)]
+    check: RaCheck,
+    /// The candidate WASM metadata (hash/size/spec), when parsed successfully.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<sdkt_wasm::WasmMetadata>,
+}
+
+/// Security section, carrying the full audit report when run.
+#[derive(Debug, serde::Serialize)]
+struct SecurityResult {
+    #[serde(flatten)]
+    check: RaCheck,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audit: Option<sdkt_audit::AuditReport>,
+}
+
+/// Upgrade-safety section.
+#[derive(Debug, serde::Serialize)]
+struct UpgradeResult {
+    #[serde(flatten)]
+    check: RaCheck,
+    /// Where the verdict came from: `previous WASM`, `live contract <id>`, etc.
+    baseline: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verdict: Option<sdkt_wasm::UpgradeVerdict>,
+}
+
+/// Deployed verification section (reuses `verify_contract`'s report).
+#[derive(Debug, serde::Serialize)]
+struct VerifyResult {
+    #[serde(flatten)]
+    check: RaCheck,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    report: Option<VerificationReport>,
+}
+
+/// Contract health section (reuses `contract_health`'s report).
+#[derive(Debug, serde::Serialize)]
+struct HealthResult {
+    #[serde(flatten)]
+    check: RaCheck,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    report: Option<ContractHealthReport>,
+}
+
+/// Aggregate, machine-readable release-assurance result.
+#[derive(Debug, serde::Serialize)]
+struct ReleaseAssuranceReport {
+    contract: Option<String>,
+    network: String,
+    artifact: ArtifactResult,
+    security: SecurityResult,
+    upgrade_safety: UpgradeResult,
+    verification: VerifyResult,
+    health: HealthResult,
+    release_status: String,
+    reasons: Vec<String>,
+}
+
+/// Deterministic status from an audit report:
+/// critical findings → FAIL, warnings → REVIEW, otherwise PASS.
+fn audit_status(summary: &sdkt_audit::AuditSummary) -> RaStatus {
+    if summary.critical > 0 {
+        RaStatus::Fail
+    } else if summary.warning > 0 {
+        RaStatus::Review
+    } else {
+        RaStatus::Pass
+    }
+}
+
+/// Deterministic status from an upgrade verdict.
+fn upgrade_verdict_status(verdict: &sdkt_wasm::UpgradeVerdict) -> RaStatus {
+    if verdict.compatible {
+        RaStatus::Pass
+    } else {
+        RaStatus::Fail
+    }
+}
+
+/// Deterministic status from a verification report's match result.
+fn verification_status(matched: Option<bool>) -> RaStatus {
+    match matched {
+        Some(true) => RaStatus::Pass,
+        Some(false) => RaStatus::Fail,
+        None => RaStatus::Review,
+    }
+}
+
+/// Deterministic status from a contract-health label.
+fn health_status(health: &str) -> RaStatus {
+    match health {
+        "healthy" => RaStatus::Pass,
+        "at_risk" => RaStatus::Review,
+        "critical" => RaStatus::Fail,
+        _ => RaStatus::Error,
+    }
+}
+
+/// Aggregate the final release status from individual check statuses.
+/// FAIL/Error dominate; any REVIEW/SKIPPED (with no hard failure) → REVIEW;
+/// otherwise PASS.
+fn aggregate_release_status(statuses: &[RaStatus]) -> String {
+    if statuses
+        .iter()
+        .any(|s| *s == RaStatus::Fail || *s == RaStatus::Error)
+    {
+        return "FAIL".to_string();
+    }
+    if statuses
+        .iter()
+        .any(|s| *s == RaStatus::Review || *s == RaStatus::Skipped)
+    {
+        return "REVIEW".to_string();
+    }
+    "PASS".to_string()
+}
+
+/// Map an on-chain check error string onto a status: a missing contract is a
+/// hard FAIL (blocking), any transport/engine error is an ERROR.
+fn contract_not_found_status(e: &str) -> RaStatus {
+    if e.contains("Contract not found") || e.contains("not found on") {
+        RaStatus::Fail
+    } else {
+        RaStatus::Error
+    }
+}
+
+/// Validates an operator-supplied byte threshold.
+///
+/// Thresholds are policy inputs, not network constants: SDKT ships no default
+/// and hardcodes no Stellar limit. `0` would reject every artifact, so it is
+/// rejected up front.
+fn validate_size_threshold_bytes(value: Option<u64>, flag: &str) -> Result<(), String> {
+    if value == Some(0) {
+        return Err(format!(
+            "{flag} must be greater than 0 (0 would reject every artifact)"
+        ));
+    }
+    Ok(())
+}
+
+/// Validates an operator-supplied percentage threshold (finite, non-negative).
+fn validate_size_threshold_pct(value: Option<f64>, flag: &str) -> Result<(), String> {
+    if let Some(v) = value {
+        if !v.is_finite() {
+            return Err(format!("{flag} must be a finite number (got {v})"));
+        }
+        if v < 0.0 {
+            return Err(format!("{flag} must not be negative (got {v})"));
+        }
+    }
+    Ok(())
+}
+
+/// Renders a growth value for policy messages, including the undefined case.
+fn format_growth_pct(pct: Option<f64>) -> String {
+    match pct {
+        Some(p) => format!("{p}%"),
+        None => "undefined (zero-byte baseline)".to_string(),
+    }
+}
+
+/// Evaluate the operator-supplied size policy against a measured size pair.
+///
+/// Returns the violated rules (empty when satisfied). Pure, shared by
+/// `sdkt diff` and `sdkt release-assurance` so both commands enforce the same
+/// semantics. Boundaries are inclusive: a violation requires size `>` limit or
+/// growth `>` pct — a value exactly at the threshold passes. `old_bytes: None`
+/// means no baseline is available (growth requested without one) and is always
+/// a violation rather than a silent skip. `size_delta_pct` returning `None`
+/// (zero-byte baseline, non-empty candidate) is also a violation: the request
+/// cannot be evaluated honestly.
+fn evaluate_size_policy(
+    old_bytes: Option<usize>,
+    new_bytes: usize,
+    max_size_bytes: Option<u64>,
+    max_growth_pct: Option<f64>,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    if let Some(max) = max_size_bytes {
+        if new_bytes as u64 > max {
+            violations.push(format!(
+                "artifact size {} bytes exceeds --max-size-bytes {}",
+                new_bytes, max
+            ));
+        }
+    }
+    if let Some(max_pct) = max_growth_pct {
+        match old_bytes {
+            None => violations.push(
+                "--max-growth-pct requires a previous artifact (--previous-wasm) to measure growth"
+                    .to_string(),
+            ),
+            Some(old) => match sdkt_wasm::size_delta_pct(old, new_bytes) {
+                Some(pct) if pct > max_pct => violations.push(format!(
+                    "size growth {} exceeds --max-growth-pct {}",
+                    format_growth_pct(Some(pct)),
+                    max_pct
+                )),
+                Some(_) => {}
+                None => violations.push(format!(
+                    "size growth is {} — cannot be compared against --max-growth-pct {}",
+                    format_growth_pct(None),
+                    max_pct
+                )),
+            },
+        }
+    }
+    violations
+}
+
+/// Map a [`sdkt_wasm::SpecDiff`]'s sizes onto the shared size policy.
+fn evaluate_size_policy_for_diff(
+    diff: &sdkt_wasm::SpecDiff,
+    max_size_bytes: Option<u64>,
+    max_growth_pct: Option<f64>,
+) -> Vec<String> {
+    evaluate_size_policy(
+        Some(diff.old.size_bytes),
+        diff.new.size_bytes,
+        max_size_bytes,
+        max_growth_pct,
+    )
+}
+
+/// Apply the opt-in size policy to a finished release-assurance report.
+///
+/// Mutates the artifact section (status → FAIL, violation text appended to its
+/// detail) and then re-runs the existing aggregation so `release_status`,
+/// `reasons`, and the process exit code stay internally consistent. No policy
+/// flags ⇒ the report is returned untouched.
+fn apply_size_policy_to_assurance(
+    report: &mut ReleaseAssuranceReport,
+    previous_wasm_path: Option<&str>,
+    max_size_bytes: Option<u64>,
+    max_growth_pct: Option<f64>,
+) -> Result<(), String> {
+    if max_size_bytes.is_none() && max_growth_pct.is_none() {
+        return Ok(());
+    }
+    // An unparsable candidate has no measurable size; the artifact section is
+    // already FAIL and the report must not be softened by policy.
+    let Some(new_bytes) = report.artifact.metadata.as_ref().map(|m| m.size_bytes) else {
+        return Ok(());
+    };
+    // Growth needs the baseline size only; a missing/unreadable file is an
+    // explicit error (the caller already required --previous-wasm for growth).
+    let previous_size_bytes = match (previous_wasm_path, max_growth_pct) {
+        (Some(path), Some(_)) => Some(
+            fs::read(path)
+                .map_err(|e| format!("Failed to read previous WASM {}: {}", path, e))?
+                .len(),
+        ),
+        _ => None,
+    };
+    let violations = evaluate_size_policy(
+        previous_size_bytes,
+        new_bytes,
+        max_size_bytes,
+        max_growth_pct,
+    );
+    if violations.is_empty() {
+        return Ok(());
+    }
+    for v in &violations {
+        report
+            .artifact
+            .check
+            .detail
+            .push_str(&format!("; size policy: {v}"));
+    }
+    report.artifact.check.status = RaStatus::Fail;
+    // Re-aggregate with the existing model so status/reasons/exit stay coherent.
+    let statuses = [
+        report.artifact.check.status,
+        report.security.check.status,
+        report.upgrade_safety.check.status,
+        report.verification.check.status,
+        report.health.check.status,
+    ];
+    report.release_status = aggregate_release_status(&statuses);
+    report.reasons.retain(|r| r != "Artifact: FAIL");
+    report.reasons.insert(0, "Artifact: FAIL".to_string());
+    Ok(())
+}
+
+/// Pretty-print the aggregate report to stdout.
+fn print_release_assurance_pretty(r: &ReleaseAssuranceReport) {
+    println!("Soroban Release Assurance");
+    println!("────────────────────────");
+    println!("Artifact        {}", r.artifact.check.status);
+    println!("Security        {}", r.security.check.status);
+    println!("Upgrade Safety  {}", r.upgrade_safety.check.status);
+    println!("Verification    {}", r.verification.check.status);
+    println!("Contract Health {}", r.health.check.status);
+    println!();
+    println!("RELEASE STATUS  {}", r.release_status.to_uppercase());
+    if !r.reasons.is_empty() {
+        println!();
+        println!("Reasons:");
+        for reason in &r.reasons {
+            println!("  - {}", reason);
+        }
+    }
+}
+
+/// Read-only release-assurance composition reusing the existing SDKT engines:
+/// artifact (sdkt-wasm metadata) → security (sdkt-audit) → upgrade safety
+/// (sdkt-wasm diff/verdict) → deployed verification (`verify_contract`) →
+/// contract health (`contract_health`), aggregated into one release status.
+///
+/// No mutation, signing, submission, TTL extend/restore, or filesystem writes
+/// are performed. The returned report is printed and exit-coded by the caller.
+async fn run_release_assurance(
+    client: &SorobanRpcClient,
+    wasm_path: &str,
+    previous_wasm_path: Option<&str>,
+    audit_paths: &[String],
+    disable: &[String],
+    contract_id: Option<&str>,
+    network: &str,
+) -> Result<ReleaseAssuranceReport, String> {
+    // ---- 1. ARTIFACT (existing sdkt-wasm metadata engine, offline) ----
+    let candidate_bytes = fs::read(wasm_path)
+        .map_err(|e| format!("Failed to read WASM file {}: {}", wasm_path, e))?;
+
+    let artifact = match sdkt_wasm::parse_metadata(&candidate_bytes) {
+        Ok(metadata) => {
+            let detail = format!(
+                "valid WASM v{} ({} bytes, sha256 {})",
+                metadata.version, metadata.size_bytes, metadata.hash
+            );
+            ArtifactResult {
+                check: RaCheck {
+                    status: RaStatus::Pass,
+                    detail,
+                },
+                metadata: Some(metadata),
+            }
+        }
+        Err(e) => ArtifactResult {
+            check: RaCheck {
+                status: RaStatus::Fail,
+                detail: format!("{} is not valid WASM: {}", wasm_path, e),
+            },
+            metadata: None,
+        },
+    };
+
+    // ---- 2. SECURITY (existing sdkt-audit engine, offline) ----
+    let security = run_release_security(audit_paths, disable).await;
+
+    // ---- 3. UPGRADE SAFETY (existing upgrade engine, offline vs previous or live) ----
+    let upgrade = run_release_upgrade_safety(
+        client,
+        &candidate_bytes,
+        previous_wasm_path,
+        contract_id,
+        network,
+        &artifact,
+    )
+    .await;
+
+    // ---- 4. VERIFICATION + 5. HEALTH (existing verify_contract / contract_health) ----
+    // Errors carry (status, message): a not-found contract is a blocking FAIL,
+    // anything else is an ERROR; both keep the engine's own message.
+    let (verification, health): (
+        OnChainResult<VerificationReport>,
+        OnChainResult<ContractHealthReport>,
+    ) = match contract_id {
+        None => (
+            Err((
+                RaStatus::Skipped,
+                "--contract not supplied; on-chain check skipped".to_string(),
+            )),
+            Err((
+                RaStatus::Skipped,
+                "--contract not supplied; on-chain check skipped".to_string(),
+            )),
+        ),
+        Some(_) if artifact.check.status != RaStatus::Pass => (
+            Err((
+                RaStatus::Skipped,
+                "candidate WASM artifact is invalid; on-chain check skipped".to_string(),
+            )),
+            Err((
+                RaStatus::Skipped,
+                "candidate WASM artifact is invalid; on-chain check skipped".to_string(),
+            )),
+        ),
+        Some(cid) => {
+            let v = verify_contract(client, cid, Some(&candidate_bytes), network)
+                .await
+                .map_err(|e| (contract_not_found_status(&e), e));
+            let h = contract_health(client, cid, Some(&candidate_bytes), network)
+                .await
+                .map_err(|e| (contract_not_found_status(&e), e));
+            (v, h)
+        }
+    };
+
+    let verification_result = match verification {
+        Ok(report) => VerifyResult {
+            check: RaCheck {
+                status: verification_status(report.matches),
+                detail: if report.explanation.is_empty() {
+                    report.verification_status.clone()
+                } else {
+                    report.explanation.clone()
+                },
+            },
+            report: Some(report),
+        },
+        Err((status, msg)) => VerifyResult {
+            check: RaCheck {
+                status,
+                detail: msg,
+            },
+            report: None,
+        },
+    };
+
+    let health_result = match health {
+        Ok(report) => {
+            let st = health_status(&report.health);
+            let detail = if report.reasons.is_empty() {
+                format!("health: {}", report.health)
+            } else {
+                report.reasons.join(" ")
+            };
+            HealthResult {
+                check: RaCheck { status: st, detail },
+                report: Some(report),
+            }
+        }
+        Err((status, msg)) => HealthResult {
+            check: RaCheck {
+                status,
+                detail: msg,
+            },
+            report: None,
+        },
+    };
+
+    let statuses = [
+        artifact.check.status,
+        security.check.status,
+        upgrade.check.status,
+        verification_result.check.status,
+        health_result.check.status,
+    ];
+    let release_status = aggregate_release_status(&statuses);
+
+    let mut reasons = Vec::new();
+    for (label, s) in [
+        ("Artifact", artifact.check.status),
+        ("Security", security.check.status),
+        ("Upgrade Safety", upgrade.check.status),
+        ("Verification", verification_result.check.status),
+        ("Contract Health", health_result.check.status),
+    ] {
+        if matches!(s, RaStatus::Fail | RaStatus::Error | RaStatus::Review) {
+            reasons.push(format!("{}: {}", label, s));
+        }
+    }
+
+    Ok(ReleaseAssuranceReport {
+        contract: contract_id.map(|c| c.to_string()),
+        network: network.to_string(),
+        artifact,
+        security,
+        upgrade_safety: upgrade,
+        verification: verification_result,
+        health: health_result,
+        release_status,
+        reasons,
+    })
+}
+
+/// ---- 2. SECURITY engine reuse ----
+async fn run_release_security(audit_paths: &[String], disable: &[String]) -> SecurityResult {
+    if audit_paths.is_empty() {
+        return SecurityResult {
+            check: RaCheck {
+                status: RaStatus::Skipped,
+                detail: "no --audit supplied; static security audit not executed".to_string(),
+            },
+            audit: None,
+        };
+    }
+
+    let disabled_refs: Vec<&str> = disable.iter().map(String::as_str).collect();
+
+    let mut source_paths = Vec::new();
+    for input in audit_paths {
+        let input_path = std::path::Path::new(input);
+        match collect_rust_sources(input_path) {
+            Ok(mut files) => source_paths.append(&mut files),
+            Err(e) => {
+                return SecurityResult {
+                    check: RaCheck {
+                        status: RaStatus::Error,
+                        detail: format!("Failed to discover Rust sources '{}': {}", input, e),
+                    },
+                    audit: None,
+                };
+            }
+        }
+    }
+    source_paths.sort();
+    source_paths.dedup();
+
+    if source_paths.is_empty() {
+        return SecurityResult {
+            check: RaCheck {
+                status: RaStatus::Error,
+                detail: "No Rust source files (.rs) found in the supplied --audit paths"
+                    .to_string(),
+            },
+            audit: None,
+        };
+    }
+
+    let mut aggregate = sdkt_audit::AuditReport::default();
+    for source_path in &source_paths {
+        let source = match fs::read_to_string(source_path) {
+            Ok(source) => source,
+            Err(e) => {
+                aggregate.add(sdkt_audit::Finding {
+                    rule_id: "AUDIT-IO".to_string(),
+                    severity: sdkt_audit::Severity::Critical,
+                    message: format!("Failed to read source: {}", e),
+                    location: None,
+                    file: Some(source_path.display().to_string()),
+                });
+                continue;
+            }
+        };
+
+        match sdkt_audit::audit_source_with(&source, &disabled_refs) {
+            Ok(report) => {
+                for f in &report.findings {
+                    aggregate.add(f.clone());
+                }
+            }
+            Err(_) => {
+                aggregate.add(sdkt_audit::Finding {
+                    rule_id: "AUDIT-PARSE".to_string(),
+                    severity: sdkt_audit::Severity::Critical,
+                    message: "Failed to parse Rust source".to_string(),
+                    location: None,
+                    file: Some(source_path.display().to_string()),
+                });
+            }
+        }
+    }
+
+    let status = audit_status(&aggregate.summary);
+    let detail = format!(
+        "{} critical, {} warning, {} info findings across {} file(s)",
+        aggregate.summary.critical,
+        aggregate.summary.warning,
+        aggregate.summary.info,
+        source_paths.len()
+    );
+
+    SecurityResult {
+        check: RaCheck { status, detail },
+        audit: Some(aggregate),
+    }
+}
+
+/// ---- 3. UPGRADE SAFETY engine reuse ----
+async fn run_release_upgrade_safety(
+    client: &SorobanRpcClient,
+    candidate_bytes: &[u8],
+    previous_wasm_path: Option<&str>,
+    contract_id: Option<&str>,
+    network: &str,
+    artifact: &ArtifactResult,
+) -> UpgradeResult {
+    if artifact.check.status != RaStatus::Pass {
+        return UpgradeResult {
+            check: RaCheck {
+                status: RaStatus::Skipped,
+                detail: "candidate WASM artifact is invalid; upgrade-safety skipped".to_string(),
+            },
+            baseline: "none".to_string(),
+            verdict: None,
+        };
+    }
+
+    if let Some(prev_path) = previous_wasm_path {
+        match fs::read(prev_path) {
+            Ok(prev_bytes) => match sdkt_wasm::upgrade_safety_wasm(&prev_bytes, candidate_bytes) {
+                Ok(verdict) => {
+                    let detail = if verdict.compatible {
+                        format!(
+                            "compatible ({} breaking, {} non-breaking)",
+                            verdict.breaking_changes.len(),
+                            verdict.non_breaking_changes.len()
+                        )
+                    } else {
+                        format!(
+                            "INCOMPATIBLE ({} breaking changes)",
+                            verdict.breaking_changes.len()
+                        )
+                    };
+                    UpgradeResult {
+                        check: RaCheck {
+                            status: upgrade_verdict_status(&verdict),
+                            detail,
+                        },
+                        baseline: format!("previous WASM {}", prev_path),
+                        verdict: Some(verdict),
+                    }
+                }
+                Err(e) => UpgradeResult {
+                    check: RaCheck {
+                        status: RaStatus::Error,
+                        detail: format!("failed to diff baseline WASM: {}", e),
+                    },
+                    baseline: format!("previous WASM {}", prev_path),
+                    verdict: None,
+                },
+            },
+            Err(e) => UpgradeResult {
+                check: RaCheck {
+                    status: RaStatus::Error,
+                    detail: format!("Failed to read previous WASM {}: {}", prev_path, e),
+                },
+                baseline: format!("previous WASM {}", prev_path),
+                verdict: None,
+            },
+        }
+    } else if let Some(cid) = contract_id {
+        // Offline upgrade-safety needs a baseline: fetch the deployed WASM.
+        match upgrade_assurance_against_deployed(client, cid, candidate_bytes, network).await {
+            Ok((_diff, verdict, wasm_hash)) => {
+                let detail = if verdict.compatible {
+                    format!(
+                        "compatible vs live {} ({} breaking, {} non-breaking)",
+                        wasm_hash,
+                        verdict.breaking_changes.len(),
+                        verdict.non_breaking_changes.len()
+                    )
+                } else {
+                    format!(
+                        "INCOMPATIBLE vs live {} ({} breaking changes)",
+                        wasm_hash,
+                        verdict.breaking_changes.len()
+                    )
+                };
+                UpgradeResult {
+                    check: RaCheck {
+                        status: upgrade_verdict_status(&verdict),
+                        detail,
+                    },
+                    baseline: format!("live contract {}", cid),
+                    verdict: Some(verdict),
+                }
+            }
+            Err(e) => UpgradeResult {
+                check: RaCheck {
+                    status: contract_not_found_status(&e),
+                    detail: e,
+                },
+                baseline: format!("live contract {}", cid),
+                verdict: None,
+            },
+        }
+    } else {
+        UpgradeResult {
+            check: RaCheck {
+                status: RaStatus::Skipped,
+                detail: "no --previous-wasm and no --contract; upgrade-safety needs a baseline (off-line diff vs on-chain)".to_string(),
+            },
+            baseline: "none".to_string(),
+            verdict: None,
+        }
+    }
 }
 
 /// Parse a `--salt` value (40 hex chars) into a 20-byte deployment salt.
@@ -1747,7 +2534,7 @@ fn storage_key_label(raw: &str, spec: &sdkt_wasm::ContractSpec) -> String {
 
 /// Shared typed-argument parser used by `call`, `tx build`, and `invoke`.
 ///
-/// Accepts `TYPE:VALUE` pairs (u32|i32|u64|i64|u128|i128|bool|string|bytes|
+/// Accepts `TYPE:VALUE` pairs (u32|i32|u64|i64|timepoint|duration|u128|i128|bool|string|bytes|
 /// address) and returns base64-encoded `ScVal` strings ready for
 /// `InvokeTransactionParams::args`. Values without a recognized `TYPE:` prefix
 /// are passed through as-is (assumed pre-encoded base64 ScVal), matching the
@@ -1777,6 +2564,7 @@ fn parse_hex_bytes(raw: &str) -> Result<Vec<u8>, String> {
 
 fn parse_typed_args(args: &[String], strict: bool) -> Result<Vec<String>, String> {
     use sdkt_xdr::{scval_to_base64, Address, IntoScVal};
+    use stellar_xdr::{Duration, TimePoint};
     let mut parsed = Vec::new();
     for a in args.iter() {
         if let Some((t, v)) = a.split_once(':') {
@@ -1794,6 +2582,20 @@ fn parse_typed_args(args: &[String], strict: bool) -> Result<Vec<String>, String
                 "u64" => {
                     let n: u64 = v.parse().map_err(|_| format!("invalid u64 value: {v}"))?;
                     scval_to_base64(&n.into_scval().map_err(|e| e.to_string())?)
+                        .map_err(|e| e.to_string())?
+                }
+                "timepoint" => {
+                    let n: u64 = v
+                        .parse()
+                        .map_err(|_| format!("invalid timepoint value: {v}"))?;
+                    scval_to_base64(&TimePoint(n).into_scval().map_err(|e| e.to_string())?)
+                        .map_err(|e| e.to_string())?
+                }
+                "duration" => {
+                    let n: u64 = v
+                        .parse()
+                        .map_err(|_| format!("invalid duration value: {v}"))?;
+                    scval_to_base64(&Duration(n).into_scval().map_err(|e| e.to_string())?)
                         .map_err(|e| e.to_string())?
                 }
                 "i64" => {
@@ -1847,7 +2649,7 @@ fn parse_typed_args(args: &[String], strict: bool) -> Result<Vec<String>, String
                 _ => {
                     if strict {
                         return Err(format!(
-                            "unknown arg type '{t}'. Use u32|i32|u64|i64|u128|i128|bool|string|symbol|bytes|address"
+                            "unknown arg type '{t}'. Use u32|i32|u64|i64|timepoint|duration|u128|i128|bool|string|symbol|bytes|address"
                         ));
                     }
                     a.clone() // passthrough: pre-encoded base64 ScVal
@@ -2067,85 +2869,11 @@ fn resolve_storage_analyze_keys(
     Ok(keys)
 }
 
-/// Render a storage diff for human consumption.
-///
-/// Kept pure (no I/O) so both the CLI output and its tests exercise the same
-/// formatting: the changed/unchanged summary followed by one block per change
-/// kind. Long base64 values are truncated to their leading characters, which is
-/// enough to tell two captured values apart.
-fn render_storage_diff_pretty(diff: &SnapshotDiff) -> String {
-    fn short(value: Option<&str>) -> String {
-        match value {
-            Some(v) => {
-                let head: String = v.chars().take(24).collect();
-                if head.len() < v.len() {
-                    format!("{head}…")
-                } else {
-                    head
-                }
-            }
-            None => "<none>".to_string(),
-        }
-    }
-
-    let mut out = String::new();
-    out.push_str(&format!(
-        "Storage Diff for Contract: {}\n",
-        diff.contract_id
-    ));
-    out.push_str(&format!("Changed:   {}\n", diff.changed()));
-    out.push_str(&format!("Unchanged: {}\n", diff.unchanged));
-
-    if !diff.value_changed.is_empty() {
-        out.push_str("\nValue Changed:\n");
-        for delta in &diff.value_changed {
-            out.push_str(&format!(
-                "  {} [{}]\n    before: {}\n    after:  {}\n",
-                delta.key,
-                delta.class.label(),
-                short(delta.before.as_deref()),
-                short(delta.after.as_deref()),
-            ));
-        }
-    }
-
-    if !diff.ttl_changed.is_empty() {
-        out.push_str("\nTTL Changed:\n");
-        for delta in &diff.ttl_changed {
-            out.push_str(&format!(
-                "  {} [{}] ttl {} -> {}, cost {} -> {} stroops\n",
-                delta.key,
-                delta.class.label(),
-                delta.before_ttl,
-                delta.after_ttl,
-                delta.before_extension_cost_stroops,
-                delta.after_extension_cost_stroops,
-            ));
-        }
-    }
-
-    if !diff.added.is_empty() {
-        out.push_str("\nAdded:\n");
-        for key in &diff.added {
-            out.push_str(&format!("  {key}\n"));
-        }
-    }
-
-    if !diff.removed.is_empty() {
-        out.push_str("\nRemoved:\n");
-        for key in &diff.removed {
-            out.push_str(&format!("  {key}\n"));
-        }
-    }
-
-    out
-}
-
 /// Encode typed `TYPE:VALUE` values to a single base64 XDR `ScVal` string.
 ///
 /// This is the write-direction counterpart to `sdkt decode`. Supported types
 /// are the primitives this CLI already encodes elsewhere (`parse_typed_args`):
-/// `u32`, `i32`, `u64`, `i64`, `u128`, `i128`, `bool`, `address`, `string`,
+/// `u32`, `i32`, `u64`, `i64`, `timepoint`, `duration`, `u128`, `i128`, `bool`, `address`, `string`,
 /// `symbol`, `bytes`. `json:<JSON>` encodes one composite value through
 /// `sdkt_xdr::json_to_scval`. Exactly one value is encoded per invocation;
 /// passing more than one is rejected to keep the output unambiguous.
@@ -2166,7 +2894,7 @@ fn run_encode(values: &[String]) -> Result<String, String> {
     })?;
 
     use sdkt_xdr::{scval_to_base64, Address, IntoScVal};
-    use stellar_xdr::{ScSymbol, ScVal};
+    use stellar_xdr::{Duration, ScSymbol, ScVal, TimePoint};
     let scval = match ty.to_lowercase().as_str() {
         "u32" => raw
             .parse::<u32>()
@@ -2183,6 +2911,18 @@ fn run_encode(values: &[String]) -> Result<String, String> {
             .map_err(|_| format!("invalid u64 value: {raw}"))?
             .into_scval()
             .map_err(|e| e.to_string())?,
+        "timepoint" => TimePoint(
+            raw.parse::<u64>()
+                .map_err(|_| format!("invalid timepoint value: {raw}"))?,
+        )
+        .into_scval()
+        .map_err(|e| e.to_string())?,
+        "duration" => Duration(
+            raw.parse::<u64>()
+                .map_err(|_| format!("invalid duration value: {raw}"))?,
+        )
+        .into_scval()
+        .map_err(|e| e.to_string())?,
         "i64" => raw
             .parse::<i64>()
             .map_err(|_| format!("invalid i64 value: {raw}"))?
@@ -2227,7 +2967,7 @@ fn run_encode(values: &[String]) -> Result<String, String> {
         }
         other => {
             return Err(format!(
-                "unknown type '{other}'. Use u32|i32|u64|i64|u128|i128|bool|string|symbol|bytes|address"
+                "unknown type '{other}'. Use u32|i32|u64|i64|timepoint|duration|u128|i128|bool|string|symbol|bytes|address"
             ))
         }
     };
@@ -2246,6 +2986,12 @@ mod encode_tests {
             "u128:+42",
             "u128:18446744073709551617",
             "u128:340282366920938463463374607431768211455",
+            "timepoint:0",
+            "timepoint:1758000000",
+            "timepoint:18446744073709551615",
+            "duration:0",
+            "duration:86400",
+            "duration:18446744073709551615",
             "U128:1000000",
             "i128:0",
             "i128:-0",
@@ -2378,6 +3124,24 @@ mod encode_tests {
         // Valid JSON the converter cannot represent (floats) is also reported per input.
         let err = run_encode(&["json:1.5".to_string()]).unwrap_err();
         assert_eq!(err, "cannot encode 'json:1.5': invalid JSON argument: 1.5");
+    }
+
+    #[test]
+    fn timepoint_and_duration_reject_invalid_u64_values_consistently() {
+        for input in [
+            "timepoint:abc",
+            "timepoint:-1",
+            "timepoint:18446744073709551616",
+            "duration:abc",
+            "duration:-1",
+            "duration:18446744073709551616",
+        ] {
+            let args = [input.to_string()];
+            let encode_error = run_encode(&args).unwrap_err();
+            for strict in [false, true] {
+                assert_eq!(parse_typed_args(&args, strict).unwrap_err(), encode_error);
+            }
+        }
     }
 }
 
@@ -2514,18 +3278,22 @@ fn print_verdict_changes(changes: &[sdkt_wasm::VerdictChange]) {
 /// reuses `sdkt-rpc` retrieval and `sdkt-wasm` diffing verbatim. Read-only; the
 /// network/mainnet-safety guard is inherited from `resolve_rpc_client` in the
 /// caller.
-async fn run_upgrade_safety(
+/// Minimal extraction: run the existing upgrade-safety engine
+/// (`inspect_contract` → `get_wasm_bytecode` → `diff_wasm` →
+/// `UpgradeVerdict::from_diff`) against the *deployed* contract.
+///
+/// Shared verbatim by `sdkt verify --upgrade-safety` and the release-assurance
+/// composition so neither duplicates the comparison. Read-only.
+async fn upgrade_assurance_against_deployed(
     client: &SorobanRpcClient,
     contract_id: &str,
     candidate_bytes: &[u8],
     network: &str,
-    fmt: OutputFormat,
-) -> Result<(), String> {
+) -> Result<(sdkt_wasm::SpecDiff, sdkt_wasm::UpgradeVerdict, String), String> {
     // Candidate WASM is parsed offline first (fail-fast on malformed input).
-    let _candidate_meta = sdkt_wasm::parse_metadata(candidate_bytes)
-        .map_err(|e| format!("{} is not valid WASM: {}", "<candidate>", e))?;
+    sdkt_wasm::parse_metadata(candidate_bytes)
+        .map_err(|e| format!("candidate is not valid WASM: {}", e))?;
 
-    // On-chain WASM hash ( path).
     let inspection = inspect_contract(client, contract_id)
         .await
         .map_err(|e| match e {
@@ -2536,18 +3304,27 @@ async fn run_upgrade_safety(
         })?;
     let wasm_hash = inspection.wasm_hash;
 
-    // Fetch the raw on-chain WASM bytecode ( path) — reuse existing extractor.
     let deployed_bytes = get_wasm_bytecode(client, &wasm_hash)
         .await
         .map_err(|e| format!("could not fetch on-chain WASM for {}: {}", contract_id, e))?;
 
-    // Compare the two ContractSpecs with the engine (raw entry point reuses
-    // diff_specs internally). The "old" side is the deployed contract; the "new"
-    // side is the candidate local WASM.
+    // "old" side is the deployed contract; "new" side is the local candidate.
     let diff = sdkt_wasm::diff_wasm(&deployed_bytes, candidate_bytes)
         .map_err(|e| format!("failed to diff contracts: {}", e))?;
-
     let verdict = sdkt_wasm::UpgradeVerdict::from_diff(&diff);
+
+    Ok((diff, verdict, wasm_hash))
+}
+
+async fn run_upgrade_safety(
+    client: &SorobanRpcClient,
+    contract_id: &str,
+    candidate_bytes: &[u8],
+    network: &str,
+    fmt: OutputFormat,
+) -> Result<(), String> {
+    let (_diff, verdict, wasm_hash) =
+        upgrade_assurance_against_deployed(client, contract_id, candidate_bytes, network).await?;
 
     if fmt == OutputFormat::Json {
         println!(
@@ -2998,24 +3775,27 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 format,
             } = &action
             {
-                if abi.is_some() && abi_contract.is_some() {
-                    eprintln!("Error: specify only one of --abi or --abi-contract");
+                if let Err(e) =
+                    commands::abi::check_abi_mutual_exclusion(abi.as_ref(), abi_contract.as_ref())
+                {
+                    eprintln!("Error: {e}");
                     process::exit(1);
                 }
 
                 let fmt = parse_format_str(format);
-                let contract_spec = if let Some(wasm_path) = abi.as_ref() {
-                    let bytes = fs::read(wasm_path)?;
-                    Some(parse_contract_spec(&bytes)?)
-                } else if let Some(id) = abi_contract.as_ref() {
-                    let client = resolve_rpc_client(
+                // Resolve the RPC client lazily: only `--abi-contract` needs the
+                // network. The local `--abi` and no-ABI paths are fully offline
+                // so an unavailable or unconfigured network profile must not
+                // cause the command to fail before either snapshot is read.
+                let contract_spec = if let Some(id) = abi_contract.as_ref() {
+                    let diff_client = resolve_rpc_client(
                         net.rpc_url.clone(),
                         net.network_passphrase.clone(),
                         net.network_profile.clone(),
                     );
-                    let inspection = inspect_contract(&client, id).await?;
-                    let bytes = get_wasm_bytecode(&client, &inspection.wasm_hash).await?;
-                    Some(parse_contract_spec(&bytes)?)
+                    commands::abi::resolve_abi_spec(None, Some(id), &diff_client).await?
+                } else if let Some(wasm_path) = abi.as_ref() {
+                    Some(commands::abi::load_local_abi(wasm_path)?)
                 } else {
                     None
                 };
@@ -3149,28 +3929,23 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
 
-            if abi.is_some() && abi_contract.is_some() {
-                eprintln!("Error: specify only one of --abi or --abi-contract");
+            if let Err(e) =
+                commands::abi::check_abi_mutual_exclusion(abi.as_ref(), abi_contract.as_ref())
+            {
+                eprintln!("Error: {e}");
                 process::exit(1);
             }
 
-            let analyze_extra_keys = match &action {
-                StorageAction::Analyze {
-                    contract_id,
-                    key_xdr,
-                    map_key,
-                    key_arg,
-                    durability,
-                    ..
-                }
-                | StorageAction::Snapshot {
-                    contract_id,
-                    key_xdr,
-                    map_key,
-                    key_arg,
-                    durability,
-                    ..
-                } => match resolve_storage_analyze_keys(
+            let analyze_extra_keys = if let StorageAction::Analyze {
+                contract_id,
+                key_xdr,
+                map_key,
+                key_arg,
+                durability,
+                ..
+            } = &action
+            {
+                match resolve_storage_analyze_keys(
                     contract_id,
                     key_xdr,
                     map_key.as_deref(),
@@ -3182,8 +3957,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                         eprintln!("Error: {e}");
                         process::exit(1);
                     }
-                },
-                _ => None,
+                }
+            } else {
+                None
             };
 
             let client = resolve_rpc_client(
@@ -3195,34 +3971,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             // Load ABI spec if provided. Two mutually exclusive sources:
             // a local WASM file (`--abi`) or a deployed contract's on-chain WASM
             // fetched via the path (`--abi-contract`).
-
             let contract_spec: Option<sdkt_wasm::ContractSpec> =
-                if let Some(wasm_path) = abi.as_ref() {
-                    let wasm_bytes =
-                        fs::read(wasm_path).map_err(|e| format!("Failed to read WASM: {}", e))?;
-                    Some(
-                        parse_contract_spec(&wasm_bytes)
-                            .map_err(|e| format!("Failed to parse ABI: {}", e))?,
-                    )
-                } else if let Some(id) = abi_contract.as_ref() {
-                    // on-chain retrieval: inspect_contract -> wasm hash, then
-                    // get_wasm_bytecode -> raw bytes, then parse_contract_spec.
-                    let inspection = inspect_contract(&client, id).await.map_err(|e| match e {
-                        sdkt_rpc::RpcError::ContractNotFound => {
-                            format!("contract {} not found", id)
-                        }
-                        other => format!("{}", other),
-                    })?;
-                    let deployed_bytes = get_wasm_bytecode(&client, &inspection.wasm_hash)
-                        .await
-                        .map_err(|e| format!("could not fetch on-chain WASM for {}: {}", id, e))?;
-                    Some(
-                        parse_contract_spec(&deployed_bytes)
-                            .map_err(|e| format!("failed to parse deployed ABI: {}", e))?,
-                    )
-                } else {
-                    None
-                };
+                commands::abi::resolve_abi_spec(abi.as_ref(), abi_contract.as_ref(), &client)
+                    .await?;
 
             match action {
                 StorageAction::Check {
@@ -3357,128 +4108,6 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         Err(e) => {
                             eprintln!("Error analyzing storage: {}", e);
-                            process::exit(1);
-                        }
-                    }
-                }
-                StorageAction::Snapshot {
-                    contract_id,
-                    out,
-                    format,
-                    ..
-                } => {
-                    let fmt = parse_format_str(&format);
-                    let extra_keys = analyze_extra_keys.expect("resolved for Snapshot");
-
-                    if out.trim().is_empty() {
-                        eprintln!("Error: --out must not be empty");
-                        process::exit(1);
-                    }
-
-                    let client = resolve_rpc_client(
-                        net.rpc_url.clone(),
-                        net.network_passphrase.clone(),
-                        net.network_profile.clone(),
-                    );
-
-                    match capture_snapshot(&client, &contract_id, &extra_keys).await {
-                        Ok(snapshot) => {
-                            let document = serde_json::to_string_pretty(&snapshot)?;
-                            if let Err(e) = fs::write(&out, &document) {
-                                eprintln!("Error: cannot write snapshot to '{}': {}", out, e);
-                                process::exit(1);
-                            }
-
-                            if fmt == OutputFormat::Json {
-                                println!("{}", document);
-                            } else {
-                                println!("Storage Snapshot for Contract: {}", snapshot.contract_id);
-                                if let Some(ledger) = snapshot.captured_at_ledger {
-                                    println!("Captured at ledger: {}", ledger);
-                                }
-                                println!("Entries: {}", snapshot.entries.len());
-                                println!("Snapshot written to: {}", out);
-                                for (i, entry) in snapshot.entries.iter().enumerate() {
-                                    println!(
-                                        "  #{:<3} [{}] ttl={} cost={} stroops value={}",
-                                        i + 1,
-                                        entry.class.label(),
-                                        entry.current_ttl,
-                                        entry.extension_cost_stroops,
-                                        match entry.value.as_deref() {
-                                            Some(v) => {
-                                                let head: String = v.chars().take(24).collect();
-                                                if head.len() < v.len() {
-                                                    format!("{head}…")
-                                                } else {
-                                                    head
-                                                }
-                                            }
-                                            None => "<none>".to_string(),
-                                        }
-                                    );
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("Error capturing storage snapshot: {}", e);
-                            process::exit(1);
-                        }
-                    }
-                }
-                StorageAction::Diff {
-                    snapshot,
-                    contract,
-                    format,
-                } => {
-                    let fmt = parse_format_str(&format);
-
-                    let document = match fs::read_to_string(&snapshot) {
-                        Ok(d) => d,
-                        Err(e) => {
-                            eprintln!("Error: cannot read snapshot '{}': {}", snapshot, e);
-                            process::exit(1);
-                        }
-                    };
-                    let base: StorageSnapshot = match serde_json::from_str(&document) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            eprintln!("Error: invalid snapshot document '{}': {}", snapshot, e);
-                            process::exit(1);
-                        }
-                    };
-
-                    let contract_id = match contract {
-                        Some(id) if !id.trim().is_empty() => id,
-                        _ => base.contract_id.clone(),
-                    };
-                    if contract_id.trim().is_empty() {
-                        eprintln!(
-                            "Error: snapshot records no contract id; pass --contract <CONTRACT_ID>"
-                        );
-                        process::exit(1);
-                    }
-
-                    let extra_keys: Vec<String> =
-                        base.entries.iter().map(|e| e.key.clone()).collect();
-
-                    let client = resolve_rpc_client(
-                        net.rpc_url.clone(),
-                        net.network_passphrase.clone(),
-                        net.network_profile.clone(),
-                    );
-
-                    match capture_snapshot(&client, &contract_id, &extra_keys).await {
-                        Ok(live) => {
-                            let diff = diff_snapshots(&base, &live);
-                            if fmt == OutputFormat::Json {
-                                println!("{}", serde_json::to_string(&diff)?);
-                            } else {
-                                print!("{}", render_storage_diff_pretty(&diff));
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("Error reading live storage for diff: {}", e);
                             process::exit(1);
                         }
                     }
@@ -3740,33 +4369,13 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                     )?;
                     let client = SorobanRpcClient::from_config(&network_config);
 
-                    let contract_spec: Option<sdkt_wasm::ContractSpec> = if let Some(wasm_path) =
-                        abi.as_ref()
-                    {
-                        let wasm_bytes =
-                            fs::read(wasm_path).map_err(|e| format!("Failed to read WASM: {e}"))?;
-                        Some(
-                            parse_contract_spec(&wasm_bytes)
-                                .map_err(|e| format!("Failed to parse ABI: {e}"))?,
+                    let contract_spec: Option<sdkt_wasm::ContractSpec> =
+                        commands::abi::resolve_abi_spec(
+                            abi.as_ref(),
+                            abi_contract.as_ref(),
+                            &client,
                         )
-                    } else if let Some(id) = abi_contract.as_ref() {
-                        let inspection =
-                            inspect_contract(&client, id).await.map_err(|e| match &e {
-                                sdkt_rpc::RpcError::ContractNotFound => {
-                                    format!("contract {id} not found")
-                                }
-                                _ => format!("{e}"),
-                            })?;
-                        let deployed_bytes = get_wasm_bytecode(&client, &inspection.wasm_hash)
-                            .await
-                            .map_err(|e| format!("could not fetch on-chain WASM for {id}: {e}"))?;
-                        Some(
-                            parse_contract_spec(&deployed_bytes)
-                                .map_err(|e| format!("failed to parse deployed ABI: {e}"))?,
-                        )
-                    } else {
-                        None
-                    };
+                        .await?;
 
                     match read_contract_state(&client, &contract, &key_xdr, contract_spec.as_ref())
                         .await
@@ -4022,6 +4631,15 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("{}", report.explanation);
                         }
                     }
+                    // Exit-code contract: a reported Mismatch is a failed
+                    // verification and must fail a caller/CI step. `Verified`
+                    // and `OnChainOnly` keep exiting 0; genuine RPC/IO errors
+                    // keep exiting non-zero via the `Err` arm below. Mirrors
+                    // `release-assurance`, which already fails on mismatch.
+                    if report.matches == Some(false) {
+                        eprintln!("Error: local WASM does NOT match the deployed contract code");
+                        process::exit(1);
+                    }
                 }
                 Err(e) => {
                     // Surface actionable messages per _PLAN.md §9.
@@ -4132,6 +4750,16 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                                 verified_note
                             );
                         }
+                    }
+                    // A `critical` verdict (mismatched deployed WASM, per
+                    // `derive_verdict`) is a real failure and must be
+                    // observable from the exit code alone, so CI and agents
+                    // cannot read a green run over a mismatched artifact.
+                    // `at_risk` keeps its existing non-blocking meaning, and
+                    // `release-assurance` treats both the same way via
+                    // `health_status()` (Fail vs Review).
+                    if health_status(&report.health) == RaStatus::Fail {
+                        process::exit(1);
                     }
                 }
                 Err(e) => {
@@ -4269,8 +4897,10 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             } => {
                 // `--abi` (local WASM) and `--abi-contract` (on-chain WASM) are
                 // mutually exclusive sources for result decoding.
-                if abi.is_some() && abi_contract.is_some() {
-                    eprintln!("Error: specify only one of --abi or --abi-contract");
+                if let Err(e) =
+                    commands::abi::check_abi_mutual_exclusion(abi.as_ref(), abi_contract.as_ref())
+                {
+                    eprintln!("Error: {e}");
                     process::exit(1);
                 }
 
@@ -4319,41 +4949,12 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                             // Load ABI spec from one of two sources: a local WASM
                             // file (`--abi`) or a deployed contract's on-chain WASM
                             // fetched via the path (`--abi-contract`).
-                            let abi_spec: Option<sdkt_wasm::ContractSpec> =
-                                if let Some(wasm_path) = &abi {
-                                    let wasm_bytes = std::fs::read(wasm_path)
-                                        .map_err(|e| format!("Failed to read WASM: {e}"))?;
-                                    Some(
-                                        sdkt_wasm::parse_contract_spec(&wasm_bytes)
-                                            .map_err(|e| format!("Failed to parse ABI: {e}"))?,
-                                    )
-                                } else if let Some(id) = abi_contract.as_ref() {
-                                    // on-chain retrieval: inspect_contract -> wasm
-                                    // hash, then get_wasm_bytecode -> raw bytes,
-                                    // then parse_contract_spec.
-                                    let inspection = inspect_contract(&client, id).await.map_err(
-                                        |e| match e {
-                                            sdkt_rpc::RpcError::ContractNotFound => {
-                                                format!("contract {} not found", id)
-                                            }
-                                            other => format!("{}", other),
-                                        },
-                                    )?;
-                                    let deployed_bytes =
-                                        get_wasm_bytecode(&client, &inspection.wasm_hash)
-                                            .await
-                                            .map_err(|e| {
-                                                format!(
-                                                    "could not fetch on-chain WASM for {}: {}",
-                                                    id, e
-                                                )
-                                            })?;
-                                    Some(sdkt_wasm::parse_contract_spec(&deployed_bytes).map_err(
-                                        |e| format!("failed to parse deployed ABI: {}", e),
-                                    )?)
-                                } else {
-                                    None
-                                };
+                            let abi_spec = commands::abi::resolve_abi_spec(
+                                abi.as_ref(),
+                                abi_contract.as_ref(),
+                                &client,
+                            )
+                            .await?;
 
                             // Decode primary result if ABI available
                             let decoded_result = abi_spec.as_ref().and_then(|spec| {
@@ -4862,38 +5463,16 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             // Resolve the ABI ContractSpec from one of two sources (mutually
             // exclusive): a local WASM file (`--abi`) or a deployed contract's
             // on-chain WASM fetched via the path (`--abi-contract`).
-            if abi.is_some() && abi_contract.is_some() {
-                eprintln!("Error: specify only one of --abi or --abi-contract");
+            if let Err(e) =
+                commands::abi::check_abi_mutual_exclusion(abi.as_ref(), abi_contract.as_ref())
+            {
+                eprintln!("Error: {e}");
                 process::exit(1);
             }
 
             let contract_spec: Option<sdkt_wasm::ContractSpec> =
-                if let Some(wasm_path) = abi.as_ref() {
-                    let wasm_bytes =
-                        fs::read(wasm_path).map_err(|e| format!("Failed to read WASM: {}", e))?;
-                    Some(
-                        parse_contract_spec(&wasm_bytes)
-                            .map_err(|e| format!("Failed to parse ABI: {}", e))?,
-                    )
-                } else if let Some(id) = abi_contract.as_ref() {
-                    // on-chain retrieval: inspect_contract -> wasm hash, then
-                    // get_wasm_bytecode -> raw bytes, then parse_contract_spec.
-                    let inspection = inspect_contract(&client, id).await.map_err(|e| match e {
-                        sdkt_rpc::RpcError::ContractNotFound => {
-                            format!("contract {} not found", id)
-                        }
-                        other => format!("{}", other),
-                    })?;
-                    let deployed_bytes = get_wasm_bytecode(&client, &inspection.wasm_hash)
-                        .await
-                        .map_err(|e| format!("could not fetch on-chain WASM for {}: {}", id, e))?;
-                    Some(
-                        parse_contract_spec(&deployed_bytes)
-                            .map_err(|e| format!("failed to parse deployed ABI: {}", e))?,
-                    )
-                } else {
-                    None
-                };
+                commands::abi::resolve_abi_spec(abi.as_ref(), abi_contract.as_ref(), &client)
+                    .await?;
 
             if let (Some(spec), Some(symbol)) = (contract_spec.as_ref(), topic.as_deref()) {
                 if let Some(warning) = unknown_event_topic_warning(spec, symbol) {
@@ -5160,8 +5739,28 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             new_wasm,
             format,
             upgrade_safety,
+            max_growth_pct,
+            max_size_bytes,
         } => {
             let fmt = parse_format_str(&format);
+            // Size policy is evaluated only in diff output mode: mixing it
+            // into --upgrade-safety would conflate size budget with ABI
+            // compatibility, so the combination is rejected explicitly.
+            if upgrade_safety && (max_size_bytes.is_some() || max_growth_pct.is_some()) {
+                eprintln!(
+                    "Error: size-policy flags apply to `sdkt diff` output only; \
+                     run without --upgrade-safety to enforce them (ABI verdict is a separate check)"
+                );
+                return Err("size policy cannot be combined with --upgrade-safety".into());
+            }
+            if let Err(e) = validate_size_threshold_bytes(max_size_bytes, "--max-size-bytes") {
+                eprintln!("Error: {e}");
+                return Err(e.into());
+            }
+            if let Err(e) = validate_size_threshold_pct(max_growth_pct, "--max-growth-pct") {
+                eprintln!("Error: {e}");
+                return Err(e.into());
+            }
             let old_bytes = fs::read(&old_wasm)
                 .map_err(|e| format!("Failed to read OLD WASM '{}': {}", old_wasm, e))?;
             let new_bytes = fs::read(&new_wasm)
@@ -5262,6 +5861,18 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                         println!();
                         println!("Total changes: {}", report.total_changes());
                     }
+                    // Size policy (opt-in): evaluated only after the report is
+                    // emitted so JSON consumers keep a clean document; violations
+                    // go to stderr and block the run (exit 1). ABI compatibility
+                    // is unaffected — the report itself is still produced.
+                    let violations =
+                        evaluate_size_policy_for_diff(&report, max_size_bytes, max_growth_pct);
+                    if !violations.is_empty() {
+                        for v in &violations {
+                            eprintln!("Error: size policy violation: {v}");
+                        }
+                        process::exit(1);
+                    }
                 }
                 Err(e) => {
                     eprintln!("Error diffing WASM: {}", e);
@@ -5276,6 +5887,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             disable,
             rules,
             no_plugins,
+            abi,
+            abi_contract,
+            net,
         } => {
             // Audit supports three output formats: pretty, json, sarif.
             // We parse the format here rather than through the shared
@@ -5347,6 +5961,36 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 return Ok(());
             }
+
+            if abi.is_some() && abi_contract.is_some() {
+                return Err("specify only one of --abi or --abi-contract".into());
+            }
+            let audit_spec = if let Some(wasm_path) = abi.as_ref() {
+                let bytes = fs::read(wasm_path)
+                    .map_err(|e| format!("Failed to read ABI WASM '{}': {}", wasm_path, e))?;
+                Some(
+                    parse_contract_spec(&bytes)
+                        .map_err(|e| format!("Failed to parse ABI WASM: {}", e))?,
+                )
+            } else if let Some(contract_id) = abi_contract.as_ref() {
+                let client = resolve_rpc_client(
+                    net.rpc_url.clone(),
+                    net.network_passphrase.clone(),
+                    net.network_profile.clone(),
+                );
+                let inspection = inspect_contract(&client, contract_id).await.map_err(|e| {
+                    format!("Failed to inspect ABI contract {}: {}", contract_id, e)
+                })?;
+                let bytes = get_wasm_bytecode(&client, &inspection.wasm_hash)
+                    .await
+                    .map_err(|e| format!("Failed to fetch ABI contract {}: {}", contract_id, e))?;
+                Some(
+                    parse_contract_spec(&bytes)
+                        .map_err(|e| format!("Failed to parse ABI WASM: {}", e))?,
+                )
+            } else {
+                None
+            };
 
             if !rules.is_empty() {
                 // Validate/resolve each --rules entry before reading source.
@@ -5678,7 +6322,13 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                     #[cfg(feature = "plugins")]
                     sdkt_audit_example_rule::register();
 
-                    match sdkt_audit::audit_source_with(&source, &disabled_refs) {
+                    let result = match audit_spec.as_ref() {
+                        Some(spec) => {
+                            sdkt_audit::audit_source_with_spec(&source, spec, &disabled_refs)
+                        }
+                        None => sdkt_audit::audit_source_with(&source, &disabled_refs),
+                    };
+                    match result {
                         Ok(report) => {
                             for finding in &report.findings {
                                 aggregate.add(finding.clone());
@@ -5695,7 +6345,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
 
                 match sdkt_audit::scan_all_functions_str(&source) {
                     Some(scans) => {
-                        let ctx = sdkt_audit::AuditContext { spec: None };
+                        let ctx = sdkt_audit::AuditContext {
+                            spec: audit_spec.as_ref(),
+                        };
                         let mut report = sdkt_audit::AuditReport::default();
                         local_reg.run_all(&scans, &ctx, &disabled_refs, &mut report);
 
@@ -5773,6 +6425,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                     struct MultiFileAuditReport {
                         files: Vec<serde_json::Value>,
                         summary: sdkt_audit::AuditSummary,
+                        spec_correlated: bool,
                     }
 
                     let files = per_file
@@ -5790,14 +6443,21 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                         serde_json::to_string(&MultiFileAuditReport {
                             files,
                             summary: aggregate.summary.clone(),
+                            spec_correlated: audit_spec.is_some(),
                         })?
                     );
                 } else {
-                    println!("{}", serde_json::to_string(&aggregate)?);
+                    let mut report = serde_json::to_value(&aggregate)?;
+                    report["spec_correlated"] = serde_json::Value::Bool(audit_spec.is_some());
+                    println!("{}", serde_json::to_string(&report)?);
                 }
             } else {
                 for (path, report) in &per_file {
                     println!("Static Analysis Report: {}", path.display());
+
+                    if audit_spec.is_some() {
+                        println!("  Spec-correlated analysis: enabled");
+                    }
 
                     if loaded_plugins > 0 {
                         println!(
@@ -5886,6 +6546,16 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("\nCustom Sections ({}):", metadata.custom_sections.len());
                     for section in &metadata.custom_sections {
                         println!("  - {}", section);
+                    }
+
+                    // Contract metadata (contractmetav0): generic key/value
+                    // entries, section order, duplicates preserved.
+                    println!("\nContract Metadata ({}):", metadata.contract_meta.len());
+                    if metadata.contract_meta.is_empty() {
+                        println!("  (none)");
+                    }
+                    for entry in &metadata.contract_meta {
+                        println!("  {} = {}", entry.key, entry.value);
                     }
 
                     println!("\nExported Functions ({}):", metadata.exports.len());
@@ -6024,8 +6694,20 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 if fmt == OutputFormat::Json {
-                    let json_str = serde_json::to_string(&inspection)?;
-                    println!("{}", json_str);
+                    // Additive: the decoded contractmetav0 entries travel with
+                    // the report so the on-chain path carries the same
+                    // provenance the offline `wasm inspect` prints. The field
+                    // is appended to the serialized object rather than added
+                    // to `ContractInspection`, keeping that type's public
+                    // shape (and its existing consumers) unchanged.
+                    let mut value = serde_json::to_value(&inspection)?;
+                    if let Some(obj) = value.as_object_mut() {
+                        obj.insert(
+                            "contract_meta".to_string(),
+                            serde_json::to_value(&meta.contract_meta)?,
+                        );
+                    }
+                    println!("{}", serde_json::to_string(&value)?);
                 } else {
                     println!("WASM Metadata:");
                     println!("Contract ID: {}", contract);
@@ -6037,6 +6719,13 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("Exports: {}", meta.exports.len());
                     println!("Imports: {}", meta.imports.len());
                     println!("Custom Sections: {}", meta.custom_sections.len());
+                    println!("Contract Metadata ({}):", meta.contract_meta.len());
+                    if meta.contract_meta.is_empty() {
+                        println!("  (none)");
+                    }
+                    for entry in &meta.contract_meta {
+                        println!("  {} = {}", entry.key, entry.value);
+                    }
                     if let Some(abi) = &inspection.abi {
                         println!(
                             "Functions ({}): {}",
@@ -6232,6 +6921,23 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Network { action } => {
             commands::network::run_network_action(action).await?;
+        }
+        Commands::DeploymentVerify {
+            contract,
+            wasm,
+            network,
+            format,
+            net,
+        } => {
+            let fmt = parse_format_str(&format);
+            commands::deployment_verify::run_deployment_verify(
+                &contract,
+                wasm.as_deref(),
+                network,
+                &net,
+                &fmt,
+            )
+            .await?;
         }
         Commands::Init {
             name,
@@ -6548,16 +7254,53 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Commands::Build => {
+        Commands::Build { format } => {
+            let fmt = parse_format_str(&format);
             let config = load_config();
             match sdkt_core::build::build_workspace(&config) {
                 Ok(results) => {
-                    println!("✓ Workspace built successfully");
-                    for res in results {
-                        println!("  ✓ {} -> {}", res.alias, res.wasm_artifact.display());
+                    if fmt == OutputFormat::Json {
+                        // Deterministic, additive machine-readable result: the
+                        // success flag plus one entry per built artifact.
+                        // Existing pretty output is unchanged.
+                        let artifacts: Vec<serde_json::Value> = results
+                            .iter()
+                            .map(|res| {
+                                serde_json::json!({
+                                    "alias": res.alias,
+                                    "path": res.path,
+                                    "wasm_artifact": res.wasm_artifact.display().to_string(),
+                                })
+                            })
+                            .collect();
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "success": true,
+                                "artifacts": artifacts,
+                            }))?
+                        );
+                    } else {
+                        println!("✓ Workspace built successfully");
+                        for res in results {
+                            println!("  ✓ {} -> {}", res.alias, res.wasm_artifact.display());
+                        }
                     }
                 }
                 Err(e) => {
+                    if fmt == OutputFormat::Json {
+                        // Error envelope on stdout with a non-zero exit, so an
+                        // agent can parse the failure deterministically instead
+                        // of reading stderr text. Mirrors `package validate`.
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "success": false,
+                                "error": e.to_string(),
+                            }))?
+                        );
+                        std::process::exit(1);
+                    }
                     eprintln!("Error building workspace: {}", e);
                     std::process::exit(1);
                 }
@@ -6579,8 +7322,10 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             // `--abi` (local WASM) and `--abi-contract` (on-chain WASM) are
             // mutually exclusive. Validate before any network I/O so the
             // error is deterministic regardless of RPC reachability.
-            if abi.is_some() && abi_contract.is_some() {
-                return Err("specify only one of --abi or --abi-contract".into());
+            if let Err(e) =
+                commands::abi::check_abi_mutual_exclusion(abi.as_ref(), abi_contract.as_ref())
+            {
+                return Err(e.into());
             }
 
             let fmt = parse_format_str(&format);
@@ -6629,35 +7374,13 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                     // Load ABI spec from one of two mutually exclusive sources:
                     // a local WASM file (--abi) or a deployed contract's
                     // on-chain WASM fetched via RPC (--abi-contract).
-                    let abi_spec = if let Some(wasm_path) = &abi {
-                        let wasm_bytes = std::fs::read(wasm_path)
-                            .map_err(|e| format!("Failed to read WASM: {e}"))?;
-                        match sdkt_wasm::parse_contract_spec(&wasm_bytes) {
-                            Ok(spec) => Some(spec),
-                            Err(e) => return Err(format!("Failed to parse ABI: {e}").into()),
-                        }
-                    } else if let Some(id) = abi_contract.as_ref() {
-                        // on-chain retrieval: inspect_contract -> wasm hash, then
-                        // get_wasm_bytecode -> raw bytes, then parse_contract_spec.
-                        let inspection =
-                            inspect_contract(&client, id).await.map_err(|e| match e {
-                                sdkt_rpc::RpcError::ContractNotFound => {
-                                    format!("contract {} not found", id)
-                                }
-                                other => format!("{}", other),
-                            })?;
-                        let deployed_bytes = get_wasm_bytecode(&client, &inspection.wasm_hash)
-                            .await
-                            .map_err(|e| {
-                                format!("could not fetch on-chain WASM for {}: {}", id, e)
-                            })?;
-                        Some(
-                            parse_contract_spec(&deployed_bytes)
-                                .map_err(|e| format!("failed to parse deployed ABI: {}", e))?,
-                        )
-                    } else {
-                        None
-                    };
+                    let abi_spec = commands::abi::resolve_abi_spec(
+                        abi.as_ref(),
+                        abi_contract.as_ref(),
+                        &client,
+                    )
+                    .await
+                    .map_err(Box::<dyn std::error::Error>::from)?;
 
                     // Decode result with ABI if available
                     let (result_display, result_decoded) = if result_raw.is_empty() {
@@ -8132,6 +8855,93 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         },
+        Commands::ReleaseAssurance {
+            wasm,
+            previous_wasm,
+            audit,
+            disable,
+            contract,
+            network,
+            format,
+            max_size_bytes,
+            max_growth_pct,
+            net,
+        } => {
+            let fmt = parse_format_str(&format);
+            // Validate policy inputs before doing any work: a requested check
+            // that cannot be evaluated must fail loudly, never be skipped.
+            if let Err(e) = validate_size_threshold_bytes(max_size_bytes, "--max-size-bytes") {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            }
+            if let Err(e) = validate_size_threshold_pct(max_growth_pct, "--max-growth-pct") {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            }
+            if max_growth_pct.is_some() && previous_wasm.is_none() {
+                eprintln!(
+                    "Error: --max-growth-pct requires --previous-wasm (growth is measured against \
+                     the previous artifact; refusing to silently skip the requested check)"
+                );
+                process::exit(1);
+            }
+            // Read-only boundary: same resolution as `verify` / `health`
+            // (`resolve_target_network`). The mutating mainnet guard does not
+            // apply — release-assurance never signs, submits, or mutates.
+            let target = match resolve_target_network(network.as_deref(), &net) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    process::exit(1);
+                }
+            };
+            let network_name = target.network_name;
+            let report = match run_release_assurance(
+                &target.client,
+                &wasm,
+                previous_wasm.as_deref(),
+                &audit,
+                &disable,
+                contract.as_deref(),
+                &network_name,
+            )
+            .await
+            {
+                Ok(report) => report,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    process::exit(1);
+                }
+            };
+            // Opt-in size policy, folded into the artifact section of the
+            // finished report: a violation flips artifact to FAIL, which the
+            // existing aggregation turns into release_status=FAIL (exit 1).
+            // With no policy flags this is a no-op.
+            let mut report = report;
+            apply_size_policy_to_assurance(
+                &mut report,
+                previous_wasm.as_deref(),
+                max_size_bytes,
+                max_growth_pct,
+            )?;
+            match fmt {
+                OutputFormat::Json => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&report).unwrap_or_else(|e| {
+                            eprintln!("Error serializing report: {}", e);
+                            process::exit(1);
+                        })
+                    );
+                }
+                OutputFormat::Pretty => print_release_assurance_pretty(&report),
+            }
+            // Deterministic exit status: blocking failure → 1, else 0
+            // (same convention as `sdkt doctor`).
+            if report.release_status == "FAIL" {
+                process::exit(1);
+            }
+        }
         Commands::Completions { shell } => {
             let mut cmd = Cli::command();
             // Wrap stdout so a consumer that closes the pipe early
@@ -8480,7 +9290,13 @@ mod m23_tests {
     fn derive_verdict_at_risk_expiring() {
         let (h, reasons) = derive_verdict(Some(true), 2, 12);
         assert_eq!(h, "at_risk");
-        assert!(reasons.iter().any(|r| r.contains("2 storage entries")));
+        let reason = reasons
+            .iter()
+            .find(|r| r.contains("2 storage entries"))
+            .unwrap();
+        let threshold_days = (u64::from(EXPIRING_SOON_LEDGERS) * 5).div_ceil(86_400);
+        assert_eq!(threshold_days, 1);
+        assert!(reason.contains(&format!("within ~{threshold_days} day)")));
     }
 
     #[test]
@@ -8563,6 +9379,105 @@ mod m23_tests {
         };
         let json2 = serde_json::to_string(&r2).unwrap();
         assert!(json2.contains("\"verified\":null") || !json2.contains("\"verified\""));
+    }
+}
+
+#[cfg(test)]
+mod wasm_size_policy_tests {
+    use super::*;
+
+    // ---- threshold validation ----
+
+    #[test]
+    fn validates_byte_threshold_rejects_zero_and_accepts_none() {
+        assert!(validate_size_threshold_bytes(None, "--max-size-bytes").is_ok());
+        assert!(validate_size_threshold_bytes(Some(1), "--max-size-bytes").is_ok());
+        let err = validate_size_threshold_bytes(Some(0), "--max-size-bytes").unwrap_err();
+        assert!(err.contains("greater than 0"), "{err}");
+    }
+
+    #[test]
+    fn validates_pct_threshold_rejects_negative_and_non_finite() {
+        assert!(validate_size_threshold_pct(None, "--max-growth-pct").is_ok());
+        assert!(validate_size_threshold_pct(Some(0.0), "--max-growth-pct").is_ok());
+        assert!(validate_size_threshold_pct(Some(10.0), "--max-growth-pct").is_ok());
+        let neg = validate_size_threshold_pct(Some(-1.0), "--max-growth-pct").unwrap_err();
+        assert!(neg.contains("negative"), "{neg}");
+        let nan = validate_size_threshold_pct(Some(f64::NAN), "--max-growth-pct").unwrap_err();
+        assert!(nan.contains("finite"), "{nan}");
+        let inf = validate_size_threshold_pct(Some(f64::INFINITY), "--max-growth-pct").unwrap_err();
+        assert!(inf.contains("finite"), "{inf}");
+    }
+
+    // ---- policy evaluation: boundaries are inclusive (violation needs >) ----
+
+    #[test]
+    fn abs_policy_boundary_is_inclusive() {
+        // size == max -> pass; size == max+1 -> violation.
+        assert!(evaluate_size_policy(Some(1), 10542, Some(10542), None).is_empty());
+        let v = evaluate_size_policy(Some(1), 10543, Some(10542), None);
+        assert_eq!(v.len(), 1);
+        assert!(
+            v[0].contains("10543 bytes exceeds --max-size-bytes 10542"),
+            "{v:?}"
+        );
+    }
+
+    #[test]
+    fn growth_policy_boundary_is_inclusive() {
+        // 198 -> 530 is +167.7%; exactly 167.7 passes, 167.6 violates.
+        assert!(evaluate_size_policy(Some(198), 530, None, Some(167.7)).is_empty());
+        let v = evaluate_size_policy(Some(198), 530, None, Some(167.6));
+        assert_eq!(v.len(), 1);
+        assert!(
+            v[0].contains("167.7% exceeds --max-growth-pct 167.6"),
+            "{v:?}"
+        );
+    }
+
+    #[test]
+    fn negative_growth_never_violates_a_growth_cap() {
+        // Shrinking is not a regression.
+        assert!(evaluate_size_policy(Some(10543), 467, None, Some(0.0)).is_empty());
+        assert!(evaluate_size_policy(Some(10543), 467, None, Some(10.0)).is_empty());
+    }
+
+    #[test]
+    fn growth_policy_requires_a_baseline() {
+        let v = evaluate_size_policy(None, 100, None, Some(10.0));
+        assert_eq!(v.len(), 1);
+        assert!(v[0].contains("requires a previous artifact"), "{v:?}");
+    }
+
+    #[test]
+    fn growth_policy_reports_zero_baseline_as_undefined_violation() {
+        // 0-byte baseline with a non-empty candidate: undefined growth must be
+        // an explicit violation, never a silent pass.
+        let v = evaluate_size_policy(Some(0), 100, None, Some(10.0));
+        assert_eq!(v.len(), 1);
+        assert!(v[0].contains("undefined (zero-byte baseline)"), "{v:?}");
+        // Both artifacts empty is defined (0.0) and passes.
+        assert!(evaluate_size_policy(Some(0), 0, None, Some(10.0)).is_empty());
+    }
+
+    #[test]
+    fn no_policy_flags_means_no_violations() {
+        // 22x growth must be fine when no policy is configured.
+        assert!(evaluate_size_policy(Some(467), 10543, None, None).is_empty());
+    }
+
+    #[test]
+    fn both_policies_can_violate_together() {
+        let v = evaluate_size_policy(Some(467), 10543, Some(1000), Some(10.0));
+        assert_eq!(v.len(), 2);
+        assert!(v[0].contains("--max-size-bytes"), "{v:?}");
+        assert!(v[1].contains("--max-growth-pct"), "{v:?}");
+    }
+
+    #[test]
+    fn growth_value_renders_undefined_case() {
+        assert_eq!(format_growth_pct(Some(12.3)), "12.3%");
+        assert_eq!(format_growth_pct(None), "undefined (zero-byte baseline)");
     }
 }
 

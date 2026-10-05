@@ -125,6 +125,17 @@ sdkt
 │                               Requires --wasm. Read-only; inherits mainnet-safety
 │                               guard.)
 │
+├── deployment-verify --contract <contract-id>
+│   ├── --wasm <file.wasm>    (local artifact to compare; offline hashed)
+│   ├── --network <testnet>   (RPC network; conflicts with --rpc-url)
+│   └── --format <json|pretty>
+│
+│   Read-only. Verdicts: MATCH (exit 0), DRIFT (exit 1), UNKNOWN (exit 1,
+│   reason given), NOT_FOUND (exit 1). Probes the raw contract-instance
+│   ledger entry — no inspection shortcuts, no bytecode download. A
+│   `stellar_asset` executable has no WASM artifact, so it is UNKNOWN, not
+│   a match. Never signs, submits, or deploys.
+│
 ├── health --contract <contract-id>
 │   ├── --wasm <file.wasm>    (optional local artifact to verify against)
 │   ├── --network <testnet>   (RPC network / report label)
@@ -134,7 +145,9 @@ sdkt
 │   ├── --old-wasm <A>
 │   ├── --new-wasm <B>
 │   ├── --format <json|pretty>
-│   └── --upgrade-safety      (emit UpgradeVerdict)
+│   ├── --upgrade-safety      (emit UpgradeVerdict; exclusive with size policy)
+│   ├── --max-growth-pct <N>  (fail when growth over the old artifact exceeds N%)
+│   └── --max-size-bytes <N>  (fail when the new artifact exceeds N bytes)
 │
 ├── audit [path.rs]
 │   ├── --list-rules          (list available audit rules and exit)
@@ -142,6 +155,16 @@ sdkt
 │   ├── --disable <RULE_ID>   (repeatable)
 │   ├── --rules <PATH>        (repeatable; external rule paths)
 │   └── --no-plugins          (skip loading installed plugins)
+├── release-assurance
+│   ├── --wasm <WASM>         (candidate artifact; required)
+│   ├── --previous-wasm <WASM> (baseline for the offline upgrade diff)
+│   ├── --audit <PATH>...     (Rust source path(s)/dir(s); same engine as `audit`)
+│   ├── --disable <RULE_ID>   (repeatable)
+│   ├── --contract <ID>       (deployed contract for on-chain checks; skipped if omitted)
+│   ├── --network <testnet>   (network for the on-chain checks; with --contract)
+│   ├── --max-size-bytes <N>  (fail when the candidate exceeds N bytes)
+│   ├── --max-growth-pct <N>  (fail when growth over --previous-wasm exceeds N%)
+│   └── --format <json|pretty>
 ├── identity
 │   ├── generate <name>
 │   ├── import <name> <secret>
@@ -158,9 +181,21 @@ sdkt
 │   ├── list
 │   ├── show <name>          [--format json|pretty]
 │   ├── check <name>         [--format json|pretty]
+│   ├── diagnose [--network <testnet>] [--rpc-url <URL>] [--format json|pretty]
 │   └── remove <name>
+│
+│   `diagnose` is read-only: getHealth/getNetwork/getLatestLedger plus two
+│   Horizon GETs. Reports passphrase identity (match/mismatch/unknown),
+│   protocol agreement across RPC and Horizon, the local sdkt version, and
+│   the ledger resource limits Horizon actually observed
+│   (base_fee_in_stroops, base_reserve_in_stroops, max_tx_set_size,
+│   protocol_version) — `unavailable` with a reason when Horizon does not
+│   answer. Limits are never hardcoded. Exit 0 only when status is `ok`;
+│   identity mismatch, protocol inconsistency or an unreachable endpoint exit
+│   1 with a valid report. Never signs, submits, or deploys.
 
 ├── build                     Compile Rust contracts in the workspace into WASM artifacts
+│   └── --format <json|pretty>   (default: pretty)
 
 ├── lock                      Generate or inspect `sdkt.lock`
 │   ├── generate              Write `sdkt.lock` from current build artifacts (run `sdkt build` first)
@@ -453,6 +488,12 @@ sdkt encode u128:340282366920938463463374607431768211455 | xargs sdkt decode --t
 sdkt encode i128:-1000 | xargs sdkt decode --type ScVal
 # {"i128": "-1000"}
 
+sdkt encode timepoint:1758000000 | xargs sdkt decode --type ScVal
+# {"timepoint": "1758000000"}
+
+sdkt encode duration:86400 | xargs sdkt decode --type ScVal
+# {"duration": "86400"}
+
 sdkt encode bytes:000aFF | xargs sdkt decode --type ScVal
 # {"bytes": "000aff"}
 
@@ -462,7 +503,7 @@ sdkt encode json:'[1,2,3]' | xargs sdkt decode --type ScVal
 
 ### Supported types (core subset)
 
-`u32`, `i32`, `u64`, `i64`, `u128`, `i128`, `bool`, `string`,
+`u32`, `i32`, `u64`, `i64`, `timepoint`, `duration`, `u128`, `i128`, `bool`, `string`,
 `symbol` (up to 32 bytes), `bytes`, `address` (Stellar `G...` strkey).
 
 Exactly one value is encoded per invocation; the `TYPE:VALUE` syntax matches
@@ -583,8 +624,29 @@ Store root precedence (lowest → highest): `<cwd>/.sdkt/plugins`,
 
 - `--format json` is supported on all read-style commands, every `plugin` subcommand, and on `diff`, `audit`, `deploy`, `init` for scripting / CI.
 - `diff --upgrade-safety` and `deploy --deny-breaking` implement the Upgrade Safety Guard (see `ROADMAP.md`).
+- **WASM size policy (opt-in).** `diff` and `release-assurance` accept `--max-size-bytes <N>` (absolute ceiling on the candidate artifact) and `--max-growth-pct <N>` (growth over the baseline). Thresholds are **operator-supplied policy** — SDKT hardcodes no Stellar network limit, and passing a threshold does not assert network-limit compliance. `diff` measures growth against `--old-wasm`; `release-assurance` requires `--previous-wasm` for a growth check and fails with an explicit error when it is missing rather than silently skipping. Violations exit non-zero: `diff` prints the violation on stderr after the report, and `release-assurance` marks the artifact section `FAIL` (so `release_status` becomes `FAIL`). Boundaries are inclusive — a size exactly at the limit or growth exactly at the cap passes. `diff --format json` also reports `size_delta_bytes` (signed) and `size_delta_pct` (one decimal, `null` when the old artifact is zero bytes). Size policy is independent of ABI compatibility: it is refused in combination with `diff --upgrade-safety`, and a size violation never changes an upgrade-safety verdict.
+
+  ```bash
+  # Report size change alongside the ABI diff (always on, no flags needed):
+  sdkt diff --old-wasm prev.wasm --new-wasm candidate.wasm --format json
+
+  # Fail the build on a >10% growth OR a >128 KiB candidate (your numbers):
+  sdkt diff --old-wasm prev.wasm --new-wasm candidate.wasm \
+      --max-growth-pct 10 --max-size-bytes 131072
+
+  # Gate a release on the same policy, inside the full assurance report:
+  sdkt release-assurance --wasm candidate.wasm --previous-wasm prev.wasm \
+      --max-growth-pct 10 --max-size-bytes 131072
+  ```
+
 - `audit` implements the static-analysis rules (AUTH-001/002/003/004, MOVE-001).
 - `audit --list-rules` discovers all registered built-in rules (with id, severity, and description). Supports `--format json` and does not require a source path argument.
+- **Health verdict exit codes.** `sdkt health` exits non-zero when the verdict is `critical` (for example, the deployed WASM does not match the file passed with `--wasm`), so a mismatched artifact cannot pass CI or an agent check that only reads the exit code. `at_risk` remains non-blocking (exit 0), matching how `release-assurance` treats it.
+- **`sdkt-agent`.** A separate binary that turns a plain-language request into a validated, read-only `sdkt` invocation: `sdkt-agent "check health of contract C… on testnet"`. It resolves the capability from the registry, pins an explicit testnet endpoint for network-touching checks, refuses mutating capabilities and mainnet targets outright, and never guesses on an ambiguous request. `--format json` emits a versioned result document; the default output is a six-line summary. Full guide — build, capability surface, ambiguity and refusal codes, artifact roles, mutation boundary, network policy, result semantics, troubleshooting: [sdkt-agent](agent.md).
+- **Agent capability registry (`sdkt_core::registry`).** The CLI's capabilities are described in one machine-readable table — command path, required/optional arguments, output formats, exit semantics, network requirement, safety class, and an evidence level — exportable as a versioned JSON manifest (`sdkt_core::registry::to_json()`). It is metadata about existing commands only: nothing is executed and no new CLI surface is added. Mutating capabilities (deploy, invoke, tx sign/submit, storage extend/restore, project deploy, identity fund) are marked `requires_confirmation` and are never marked verified by a read-only audit. Adding a capability means appending one `Capability` entry and keeping the parity test green; see the module docs for the rules the tests enforce.
+- **`sdkt build --format json`.** Emits a single JSON document on stdout: `{"success": true, "artifacts": [{"alias", "path", "wasm_artifact"}]}` on success, or `{"success": false, "error": "..."}` with a non-zero exit on failure. The advisory `sdkt.lock` report is written to stderr so stdout stays parseable; the default pretty output is unchanged.
+- **Contract metadata (`contractmetav0`).** `sdkt wasm inspect <file.wasm>` decodes the `contractmetav0` custom section and prints a `Contract Metadata` block of `key = value` entries (for example the `rsver`, `rssdkver`, and `cliver` provenance keys) in section order, with duplicate keys preserved. A WASM without the section prints `Contract Metadata (0):` followed by `(none)`. With `--format json` the entries appear as the additive `metadata.contract_meta` array of `{ "key": ..., "value": ... }` objects — an empty array when the section is absent — alongside the existing `metadata` keys, which are unchanged. A malformed `contractmetav0` payload is reported as a classified error rather than a panic.
+- `sdkt wasm metadata --contract <id>` reports the same entries for the deployed contract, from the fetched (or cached) WASM bytes: pretty output gains the identical `Contract Metadata` block, and `--format json` gains an additive top-level `contract_meta` array alongside the existing inspection keys, which are unchanged. It is empty when the deployed WASM carries no `contractmetav0`.
 - **Mainnet safety.** Mutating commands (`tx submit`, `invoke`, `deploy`, `project deploy`) refuse to target mainnet unless you explicitly select the network — via `--network-profile`, `--rpc-url`, or `--network-passphrase`. A testnet-default passphrase pointed at a mainnet endpoint is rejected before any request is sent, protecting against signing for the wrong network.
 
 ## Error Handling

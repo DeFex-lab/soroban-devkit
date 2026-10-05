@@ -9,8 +9,8 @@
 </p>
 
 <p align="center">
-  Offline-first CLI &amp; Rust toolkit for <strong>Stellar/Soroban</strong>.<br>
-  Inspect, decode, analyze, audit, diff, build, and deploy smart contracts with upgrade safety.
+  Release-assurance and operational verification toolkit for <strong>Stellar/Soroban</strong> smart contracts.<br>
+  Inspect, verify, audit, compare upgrades, and validate deployed contracts — with an aggregated release decision.
 </p>
 
 <p align="center">
@@ -21,27 +21,96 @@
 
 ---
 
-`sdkt` is an offline-first toolkit for inspecting, analyzing, validating, and managing Soroban smart contracts. It consolidates contract inspection, XDR decoding, storage TTL analysis, static security analysis, WASM diffing, and multi-contract deployment orchestration into a single CLI — so developers stop juggling 5+ separate tools.
+`sdkt` is a release-assurance and operational verification toolkit for Soroban smart contracts. It consolidates the checks that answer "is this build safe to release?" — artifact inspection, static security audit, upgrade-safety diff, deployed-contract verification, and contract health — into a single CLI with an aggregated release decision, and covers the surrounding day-to-day work (XDR decoding, storage/TTL analysis, events, network profiles, build and deployment orchestration) so developers stop juggling 5+ separate tools.
 
 ## The Problem
 
-Developing on Soroban often requires context-switching across multiple CLI tools and manual RPC scripts to build, audit, and deploy contracts. `sdkt` solves this by providing a unified interface that emphasizes **offline-first** analysis, **upgrade safety**, and **deployment orchestration**.
+Before shipping a contract upgrade, a developer has to answer several unrelated questions with unrelated tools: does the new WASM break the ABI callers depend on? Does the deployed contract actually match my build? Is the storage TTL about to expire? Did the source pass a security review? `sdkt` answers all of them from one CLI and aggregates the results into a single machine-readable release decision (`sdkt release-assurance`). It also spans the rest of the lifecycle — scaffold, build, deploy, invoke — with upgrade-safety guards applied on the write path.
 
 ## Capabilities
 
 `sdkt` spans the full read-only **and** mutating contract lifecycle:
 
+- **Release assurance** — one command aggregates artifact checks, static audit, upgrade-safety diff, deployed verification, and contract health into a single `PASS`/`REVIEW`/`FAIL` release decision (`sdkt release-assurance`); the same engine is available as a GitHub Action for CI and release gating.
 - **Inspect & decode** — base64 XDR decoding, contract ABI + storage inspection, event exploration.
 - **Analyze** — storage TTL / rent visibility, Instance / Persistent / Temporary classification, offline ABI/function/event/type WASM diffing.
 - **Secure** — static analysis of contract source (`AUTH-001/002/003/004`, `MOVE-001`) and an upgrade-safety verdict for safe contract upgrades.
+- **Verify deployed reality** — on-chain WASM hash vs local artifact (`sdkt verify`), unified contract posture (`sdkt health`).
 - **Build & ship** — typed transaction envelope builder, simulate, **native transaction signing**, submit, identity/keystore management, multi-contract workspace topological deployments, and upgrade breaking-change guards.
 
 Most commands are **offline**; only on-chain reads (`inspect`, `storage`, `tx`, `events`, `account`, `fee`, `wasm metadata`) need an RPC endpoint.
+
+## Release assurance
+
+`sdkt release-assurance` is the one command that answers the release question. It
+is **read-only** — it never signs, submits, deploys, extends TTL, or mutates any
+state — and it aggregates five checks on one candidate artifact into a single
+release status.
+
+Where it fits:
+
+```
+source → artifact → security → upgrade → deployed reality → health → release decision
+```
+
+| Section | What it checks | Source |
+|---------|----------------|--------|
+| Artifact | the candidate WASM's hash, size and spec; optional size policy | local file |
+| Security | static audit of contract source (same engine as `sdkt audit`) | `--audit <path>` |
+| Upgrade Safety | breaking-change verdict against the previous artifact | `--previous-wasm` |
+| Verification | on-chain WASM hash vs the local artifact | `--contract` + RPC |
+| Contract Health | storage/TTL posture and verdict | `--contract` + RPC |
+
+Each section reports `PASS` / `REVIEW` / `FAIL` / `SKIPPED`, then aggregates
+deterministically: any `FAIL`/`ERROR` makes `release_status` `FAIL` (exit 1),
+otherwise a `REVIEW`/`SKIPPED` yields `REVIEW` (exit 0). On-chain sections are
+**skipped** when `--contract` is omitted, and a skip is never flattened into
+`PASS`. That aggregate status is what a CI step gates on.
+
+```bash
+# Candidate vs previous artifact: offline artifact + upgrade-safety checks:
+sdkt release-assurance \
+  --wasm target/wasm32v1-none/release/my_contract.wasm \
+  --previous-wasm deployed/my_contract.wasm
+
+# Machine-readable output, plus the on-chain sections once you pass --contract:
+sdkt release-assurance \
+  --wasm target/wasm32v1-none/release/my_contract.wasm \
+  --previous-wasm deployed/my_contract.wasm \
+  --contract <CONTRACT_ID> \
+  --rpc-url https://soroban-testnet.stellar.org \
+  --format json
+```
+
+```text
+Soroban Release Assurance
+────────────────────────
+Artifact        PASS
+Security        SKIPPED
+Upgrade Safety  FAIL
+Verification    SKIPPED
+Contract Health SKIPPED
+
+RELEASE STATUS  FAIL
+
+Reasons:
+  - Upgrade Safety: FAIL
+```
+
+Add `--audit <path>` to include the source security section, `--contract <C…>`
+(read-only) to include deployed verification and health, and `--max-size-bytes`
+/ `--max-growth-pct` to enforce an operator-supplied size policy (a growth cap
+requires `--previous-wasm`).
+
+`sdkt` does not release, sign, or deploy anything on your behalf — the decision
+is evidence for *your* release process. For CI, the same command is available as
+a reusable GitHub Action: see [docs/ci-cd.md](docs/compatibility/ci-cd.md).
 
 ## Feature Highlights
 
 | Capability | Command |
 |------------|---------|
+| **Aggregated release decision** (artifact + audit + upgrade + verification + health) | `sdkt release-assurance` |
 | Decode base64 XDR (`ScVal`, `TransactionEnvelope`, `ContractEvent`) | `sdkt decode` |
 | Inspect contract ABI + storage | `sdkt inspect`, `sdkt storage check` |
 | Storage TTL / rent analysis | `sdkt storage analyze`, `sdkt storage estimate` |
@@ -86,12 +155,10 @@ verifies its SHA-256 checksum, and installs `sdkt` to `~/.local/bin/sdkt`.
    | Platform | Asset |
    |----------|-------|
    | Linux (x86_64) | `sdkt-x86_64-unknown-linux-gnu.tar.gz` |
-   | Linux (aarch64) | not in v2.5.0 Release — use `install.sh` or `cargo install sdkt-cli` |
+   | Linux (aarch64) | `sdkt-aarch64-unknown-linux-gnu.tar.gz` (built from the next tag after v2.6.0 — the v2.6.0 Release predates it; for v2.6.0 on ARM Linux use a source build) |
    | macOS (Intel) | `sdkt-x86_64-apple-darwin.tar.gz` |
    | macOS (Apple Silicon) | `sdkt-aarch64-apple-darwin.tar.gz` |
-
-   Windows x86_64 is not included in the v2.5.0 GitHub Release. Windows
-   users can install via `cargo install sdkt-cli` or build from source.
+   | Windows (x86_64) | `sdkt-x86_64-pc-windows-msvc.zip` (from v2.6.0) |
 
 2. Extract and run:
 
@@ -105,12 +172,20 @@ verifies its SHA-256 checksum, and installs `sdkt` to `~/.local/bin/sdkt`.
    sudo mv sdkt /usr/local/bin/
    ```
 
-   **Windows (v2.5.0):** no GitHub Release zip yet. Use crates.io or source:
+   **Windows (v2.6.0+):** use `sdkt-x86_64-pc-windows-msvc.zip` from the
+   GitHub Release. Alternatively, install from crates.io or source:
 
    ```powershell
    cargo install sdkt-cli
    sdkt --version
    ```
+
+   > **Version note:** the GitHub Release carries the current repository
+   > release (v2.6.0). crates.io currently publishes **v2.5.0**, so
+   > `cargo install sdkt-cli` installs v2.5.0 — which lacks the WASM size
+   > policy, the `sdkt health` critical-exit fix, `sdkt-agent`, and the
+   > Windows zip. For v2.6.0 use the release binary, or build from source
+   > (below).
 
 #### Alternative — Build from source (requires Rust 1.88.0+)
 
@@ -176,8 +251,14 @@ upgrade-safety diff step by step.
 
 ## Use Cases
 
+- **Decide whether a release is safe** — compare the candidate contract artifact
+  with its previous version, check upgrade compatibility and any release
+  constraints, and get evidence for the release decision in one aggregated report
+  (`sdkt release-assurance`). Read-only: it never signs or deploys.
 - **Inspect Soroban WASM** — read ABI, functions, events, and metadata from any
   compiled contract, offline (`sdkt wasm inspect`).
+- **Verify deployed reality** — confirm a deployed contract matches your local
+  build, and check its health (`sdkt verify`, `sdkt health`).
 - **Compare contract upgrades safely** — diff two WASM files and get a
   breaking-change verdict before deploying (`sdkt diff --upgrade-safety`).
 - **Audit contracts offline** — static security analysis of contract source with
@@ -197,7 +278,7 @@ sdkt init my-contract --minimal
 cd my-contract
 
 # 2. Build the contract into a Soroban WASM
-#    Output: target/wasm32-unknown-unknown/release/<project>.wasm
+#    Output: target/wasm32v1-none/release/<project>.wasm
 sdkt build
 
 # 3. Generate a local signing identity
@@ -220,15 +301,13 @@ openssl rand -hex 20
 
 # 7. Deploy to Testnet
 sdkt deploy \
-  --wasm target/wasm32-unknown-unknown/release/my_contract.wasm \
+  --wasm target/wasm32v1-none/release/my_contract.wasm \
   --salt <paste-hex-from-step-6> \
   --identity my-deployer \
   --network-profile testnet
 
 # 8. Invoke a contract function (state-changing: sequence → simulate → sign → submit → poll)
 sdkt invoke <CONTRACT_ID> increment --args u32:1 --identity my-deployer --network-profile testnet
-
-main
 ```
 
 For a detailed explanation of each step, see [Deploy a single contract](#deploy-a-single-contract).
@@ -252,6 +331,7 @@ See [`docs/plugin-authoring.md`](docs/plugins/plugin-authoring.md) for how to bu
 
 | Command | Purpose |
 |---------|---------|
+| `sdkt release-assurance --wasm <file> [--previous-wasm <file>] [--audit <path>] [--contract <id>] [--format json]` | Aggregated read-only release decision: artifact + security + upgrade safety + deployed verification + health. Never signs or mutates. |
 | `sdkt decode <xdr>` | Decode base64 XDR (`--type ScVal|TransactionEnvelope|ContractEvent`, `--file` for file input). |
 | `sdkt inspect <contract-id>` | Inspect a contract's ABI and storage (`--abi <wasm>` for ABI-aware decode). |
 | `sdkt storage check <contract-id>` | Storage TTL / rent visibility (`--abi <wasm>`). |
@@ -273,6 +353,7 @@ See [`docs/plugin-authoring.md`](docs/plugins/plugin-authoring.md) for how to bu
 | `sdkt diff` | Offline comparison of WASM binaries and API surfaces. |
 | `sdkt diff --old-wasm <A> --new-wasm <B>` | Offline ABI/function/event/type diff of two WASM files. Add `--upgrade-safety` for a breaking-change verdict. |
 | `sdkt build` | Compile workspace rust contracts into optimized WASMs. |
+| `sdkt-agent "<request>"` | Read-only natural-language front end: plans a request against the capability registry, refuses anything mutating, runs the CLI and returns structured evidence. `--format json` for a machine-readable result. Not on crates.io — build from source. See [docs/agent.md](docs/reference/agent.md). |
 | `sdkt deploy --wasm <file> [--salt <salt>] [--arg <type:value>...]` | Upload WASM + instantiate. Salt is auto-generated if omitted (see [Deploy a single contract](#deploy-a-single-contract) below). Pass constructor arguments via repeated `--arg type:value` flags (uses `CreateContractV2`). Add `--deny-breaking --old-wasm <deployed.wasm>` to abort on a non-backwards-compatible upgrade. |
 | `sdkt project deploy` | Deploy multi-contract workspace orchestrating topological dependency sorting. |
 | `sdkt verify --contract <ID> [--wasm <file>] [--network <net>]` | Verify a deployed contract matches a local WASM (offline hash vs on-chain hash). |
@@ -324,7 +405,7 @@ sdkt network add testnet \
 
 # 5. Deploy (salt is auto-generated if omitted)
 sdkt deploy \
-  --wasm target/wasm32-unknown-unknown/release/<project>.wasm \
+  --wasm target/wasm32v1-none/release/<project>.wasm \
   --identity my-deployer \
   --network-profile testnet
 
@@ -510,7 +591,12 @@ Most commands accept `--format json` for scripting / CI integration.
 
 ## Common Workflows
 
-- **Audit every PR** — gate merges on `sdkt audit` (fails on `critical`). See
+- **Audit every PR** — gate merges on `sdkt audit` via the
+  [reusable Action](docs/compatibility/ci-cd.md), whose `severity-threshold`
+  input fails the build on `critical` findings. The CLI itself reports findings
+  but does **not** encode severity into its exit code — `sdkt audit` exits 0
+  even when it prints critical findings, so gate on the Action (or parse
+  `--format json`'s `summary.critical`) rather than on the bare exit code. See
   [docs/ci-cd.md](docs/compatibility/ci-cd.md).
 - **Safe upgrades** — run `sdkt diff --upgrade-safety` in release CI to block
   breaking contract changes.
@@ -570,6 +656,7 @@ upgrade-safety-on-release).
 ## Documentation
 
 - [docs/quick-start.md](docs/getting-started/quick-start.md) — five-minute first-time walkthrough (offline).
+- [docs/agent.md](docs/reference/agent.md) — `sdkt-agent`: natural-language front end, capability surface, safety and refusal behaviour.
 - [docs/testnet-walkthrough.md](docs/getting-started/testnet-walkthrough.md) — end-to-end Testnet loop: identity → fund → deploy → invoke → events / storage.
 - [docs/getting-started.md](docs/getting-started/getting-started.md) — deeper offline `diff` and `audit` examples.
 - [docs/examples.md](docs/getting-started/examples.md) — command recipes & CI gating.

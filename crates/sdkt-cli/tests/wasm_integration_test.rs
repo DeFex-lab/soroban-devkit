@@ -40,9 +40,17 @@ fn test_cli_wasm_cache_clear() {
 }
 
 #[test]
-fn test_cli_wasm_cache_remove() {
+fn test_cli_wasm_cache_remove_existing_entry_succeeds() {
+    // Real cache layout, so the removal genuinely happens: <cache>/wasm/testnet/<hash>.{json,wasm}
+    let cache = tempfile::tempdir().unwrap();
+    let net_dir = cache.path().join("wasm").join("testnet");
+    std::fs::create_dir_all(&net_dir).unwrap();
+    std::fs::write(net_dir.join("fakehash123.json"), "{}").unwrap();
+    std::fs::write(net_dir.join("fakehash123.wasm"), b"wasm-bytes").unwrap();
+
     let mut cmd = Command::cargo_bin("sdkt").unwrap();
     let assert = cmd
+        .env("SDKT_CACHE_DIR", cache.path())
         .arg("wasm")
         .arg("cache")
         .arg("remove")
@@ -51,6 +59,84 @@ fn test_cli_wasm_cache_remove() {
     assert.success().stdout(predicates::str::contains(
         "Removed fakehash123 from testnet cache.",
     ));
+
+    // Both files are physically gone.
+    assert!(!net_dir.join("fakehash123.json").exists());
+    assert!(!net_dir.join("fakehash123.wasm").exists());
+}
+
+#[test]
+fn test_cli_wasm_cache_remove_missing_entry_is_not_a_success() {
+    // Regression: removing a hash that is not cached used to print
+    // "Removed …" and exit 0, which reads as a completed mutation to scripts
+    // and agents. It must fail like `identity delete` / `network remove`.
+    let cache = tempfile::tempdir().unwrap();
+
+    let mut cmd = Command::cargo_bin("sdkt").unwrap();
+    let assert = cmd
+        .env("SDKT_CACHE_DIR", cache.path())
+        .arg("wasm")
+        .arg("cache")
+        .arg("remove")
+        .arg("definitelynotcached")
+        .assert();
+    assert
+        .failure()
+        .stderr(predicates::str::contains("Not found"))
+        .stderr(predicates::str::contains("'definitelynotcached'"))
+        .stderr(predicates::str::contains("not found in testnet cache"))
+        .stdout(predicates::str::contains("Removed").not());
+}
+
+#[test]
+fn test_cli_wasm_cache_clear_reports_truthfully_on_empty_cache() {
+    // Clearing an empty cache is a true no-op success (the post-condition
+    // holds), unlike removing a named artifact that does not exist.
+    let cache = tempfile::tempdir().unwrap();
+
+    let mut cmd = Command::cargo_bin("sdkt").unwrap();
+    let assert = cmd
+        .env("SDKT_CACHE_DIR", cache.path())
+        .arg("wasm")
+        .arg("cache")
+        .arg("clear")
+        .arg("--network")
+        .arg("testnet")
+        .assert();
+    assert.success().stdout(predicates::str::contains(
+        "Cleared all cache entries for testnet.",
+    ));
+}
+
+#[test]
+fn test_cli_wasm_cache_clear_removes_existing_entries() {
+    let cache = tempfile::tempdir().unwrap();
+    let net_dir = cache.path().join("wasm").join("testnet");
+    std::fs::create_dir_all(&net_dir).unwrap();
+    std::fs::write(net_dir.join("aaa.json"), "{}").unwrap();
+    std::fs::write(net_dir.join("aaa.wasm"), b"wasm-bytes").unwrap();
+
+    let mut cmd = Command::cargo_bin("sdkt").unwrap();
+    let assert = cmd
+        .env("SDKT_CACHE_DIR", cache.path())
+        .arg("wasm")
+        .arg("cache")
+        .arg("clear")
+        .arg("--network")
+        .arg("testnet")
+        .assert();
+    assert.success().stdout(predicates::str::contains(
+        "Cleared all cache entries for testnet.",
+    ));
+
+    let mut info = Command::cargo_bin("sdkt").unwrap();
+    info.env("SDKT_CACHE_DIR", cache.path())
+        .arg("wasm")
+        .arg("cache")
+        .arg("info")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Entries: 0"));
 }
 
 #[test]
@@ -144,6 +230,41 @@ fn test_cli_wasm_inspect_us_new_pretty_kind_strings() {
     assert!(!stdout.contains("[Memory]"));
     assert!(stdout.contains("[func]") || stdout.contains("[memory]"));
 }
+
+#[test]
+fn test_cli_wasm_inspect_us_new_contract_metadata_pretty() {
+    // contractmetav0 payload must be decoded and surfaced as key = value
+    // lines (issue #171), not just the section name.
+    let wasm_path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/us_new.wasm");
+    let mut cmd = Command::cargo_bin("sdkt").unwrap();
+    let assert = cmd.arg("wasm").arg("inspect").arg(wasm_path).assert();
+
+    let output = assert.success().get_output().stdout.clone();
+    let stdout = String::from_utf8_lossy(&output);
+    assert!(
+        stdout.contains("Contract Metadata (3):"),
+        "expected a Contract Metadata block, got:\n{stdout}"
+    );
+    // Values matching XDR ground truth for this fixture.
+    assert!(stdout.contains("rsver = 1.97.1"));
+    assert!(stdout.contains("rssdkver = 22.0.11#"));
+    assert!(stdout.contains("cliver = 27.1.0#"));
+}
+
+#[test]
+fn test_cli_wasm_inspect_us_old_contract_metadata_empty() {
+    // us_old.wasm carries no contractmetav0: the block is shown as (none)
+    // and everything else renders as before.
+    let wasm_path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/us_old.wasm");
+    let mut cmd = Command::cargo_bin("sdkt").unwrap();
+    let assert = cmd.arg("wasm").arg("inspect").arg(wasm_path).assert();
+
+    let output = assert.success().get_output().stdout.clone();
+    let stdout = String::from_utf8_lossy(&output);
+    assert!(stdout.contains("Contract Metadata (0):"));
+    assert!(stdout.contains("(none)"));
+}
+
 #[test]
 fn test_cli_wasm_metadata_missing_contract() {
     let mut cmd = Command::cargo_bin("sdkt").unwrap();
@@ -423,6 +544,93 @@ fn test_cli_wasm_metadata_mock_rpc_cache_namespace() {
         .success()
         .stdout(predicates::str::contains("Cache Status: Hit"))
         .stdout(predicates::str::contains("Network: profile_alpha"));
+}
+
+#[test]
+fn test_cli_wasm_metadata_mock_rpc_reports_contract_metadata() {
+    // #171: the on-chain `wasm metadata --contract` path must report the same
+    // contractmetav0 entries the offline `wasm inspect` prints, when the WASM
+    // bytes are available (here: served by the mock RPC).
+    let cache_dir = tempdir().unwrap();
+    let network_dir = tempdir().unwrap();
+    let mock_url = spawn_mock_rpc_server(WASM_FIXTURE);
+
+    sdkt_isolated(cache_dir.path(), network_dir.path())
+        .args([
+            "network",
+            "add",
+            "profile_meta",
+            "--rpc-url",
+            &mock_url,
+            "--passphrase",
+            "Test SDF Network ; September 2015",
+        ])
+        .assert()
+        .success();
+
+    // Pretty output: decoded key = value entries, matching the fixture.
+    let pretty = sdkt_isolated(cache_dir.path(), network_dir.path())
+        .args([
+            "wasm",
+            "metadata",
+            "--contract",
+            CONTRACT_ID,
+            "--network-profile",
+            "profile_meta",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&pretty.get_output().stdout).clone();
+    assert!(
+        stdout.contains("Contract Metadata (3):"),
+        "expected contractmetav0 entries on the on-chain path, got:\n{stdout}"
+    );
+    assert!(stdout.contains("rsver = 1.97.1"));
+    assert!(stdout.contains("rssdkver = 22.0.11#"));
+    assert!(stdout.contains("cliver = 27.1.0#"));
+
+    // JSON output: additive top-level `contract_meta` array, and every
+    // pre-existing inspection key still present and unrenamed.
+    let json_out = sdkt_isolated(cache_dir.path(), network_dir.path())
+        .args([
+            "wasm",
+            "metadata",
+            "--contract",
+            CONTRACT_ID,
+            "--network-profile",
+            "profile_meta",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success();
+    let json = String::from_utf8_lossy(&json_out.get_output().stdout).clone();
+    let v: serde_json::Value =
+        serde_json::from_str(&json).unwrap_or_else(|e| panic!("invalid JSON ({e}): {json}"));
+
+    for key in [
+        "contract_id",
+        "wasm_hash",
+        "wasm_size",
+        "abi",
+        "storage_summary",
+        "ttl_info",
+        "storage_keys",
+        "contract_meta",
+    ] {
+        assert!(v.get(key).is_some(), "missing `{key}` in {v}");
+    }
+
+    let entries = v["contract_meta"]
+        .as_array()
+        .expect("contract_meta should be an array");
+    assert_eq!(entries.len(), 3, "expected 3 entries, got {entries:?}");
+    let keys: Vec<&str> = entries
+        .iter()
+        .filter_map(|e| e.get("key").and_then(|k| k.as_str()))
+        .collect();
+    assert_eq!(keys, vec!["rsver", "rssdkver", "cliver"]);
+    assert_eq!(entries[0]["value"].as_str(), Some("1.97.1"));
 }
 
 #[test]
