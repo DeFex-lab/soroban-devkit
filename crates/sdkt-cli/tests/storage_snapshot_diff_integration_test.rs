@@ -482,3 +482,106 @@ fn diff_accepts_legacy_snapshot_without_values() {
     assert!(diff.get("ttl_changed").is_none(), "{stdout}");
     assert_eq!(diff["unchanged"], 1, "{stdout}");
 }
+
+#[test]
+fn storage_diff_rejects_contract_override_that_mismatches_snapshot() {
+    let dir = tempdir().unwrap();
+    let key = contract_data_key(stellar_xdr::ScVal::U32(10));
+
+    // A snapshot recorded for VALID_CONTRACT: its ledger keys embed that
+    // contract's address, so diffing another contract's live storage against it
+    // would mix two contracts under one header.
+    let snapshot = serde_json::json!({
+        "contract_id": VALID_CONTRACT,
+        "entries": [
+            {
+                "key": key,
+                "class": "persistent",
+                "durability": "persistent",
+                "current_ttl": 20000,
+                "extension_cost_stroops": 2000000
+            }
+        ]
+    });
+    let snapshot_path = dir.path().join("snapshot.json");
+    std::fs::write(
+        &snapshot_path,
+        serde_json::to_string_pretty(&snapshot).unwrap(),
+    )
+    .unwrap();
+
+    // Different, well-formed StrKey contract id.
+    let other = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
+
+    sdkt()
+        .args([
+            "storage",
+            "diff",
+            &snapshot_path.to_string_lossy(),
+            "--contract",
+            other,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "does not match the snapshot's contract",
+        ));
+}
+
+#[test]
+fn storage_diff_extra_keys_report_added_keys() {
+    let dir = tempdir().unwrap();
+    let tracked = contract_data_key(stellar_xdr::ScVal::U32(10));
+    let created_after = contract_data_key(stellar_xdr::ScVal::U32(11));
+
+    let value: ValueCell = Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let url = mock_snapshot_rpc(1500, value.clone());
+    setup_mock_network(dir.path(), &url);
+
+    let snapshot_path = dir.path().join("snapshot.json");
+    let snapshot_path_str = snapshot_path.to_string_lossy().to_string();
+
+    sdkt_isolated(dir.path())
+        .args([
+            "storage",
+            "--network-profile",
+            "mocknet",
+            "snapshot",
+            VALID_CONTRACT,
+            "--key-xdr",
+            &tracked,
+            "--out",
+            &snapshot_path_str,
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    // A key created after the snapshot is invisible to a bare `diff` (RPC only
+    // returns the keys that were requested), so it must be probed explicitly.
+    let out = sdkt_isolated(dir.path())
+        .args([
+            "storage",
+            "--network-profile",
+            "mocknet",
+            "diff",
+            &snapshot_path_str,
+            "--key-xdr",
+            &created_after,
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    let diff: serde_json::Value = serde_json::from_str(&stdout).expect("valid diff json");
+    let added = diff["added"]
+        .as_array()
+        .unwrap_or_else(|| panic!("added must be present when a probed key is new: {stdout}"));
+    assert!(
+        added.iter().any(|k| k == &serde_json::json!(created_after)),
+        "probed key must be reported as added: {stdout}"
+    );
+}
