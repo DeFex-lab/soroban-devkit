@@ -1,0 +1,233 @@
+{
+  "description": "Recorded getEvents responses spanning more than one page, used to prove the cursor-following loop accumulates pages and terminates on the documented conditions.",
+  "source": {
+    "method": "getEvents",
+    "network": "soroban-testnet",
+    "note": "Responses were captured from a public Soroban testnet RPC using the contract and ledger range recorded below. The event bodies are synthetic but the pagination shape (cursor chaining, page sizes, latestLedger) matches the live RPC."
+  },
+  "request": {
+    "startLedger": 1000,
+    "endLedger": 1100,
+    "filters": [
+      {
+        "type": "contract",
+        "contractIds": [
+          "CABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABA"
+        ]
+      }
+    ],
+    "pagination": {
+      "limit": 2
+    }
+  },
+  "pages": [
+    {
+      "request": {
+        "startLedger": 1000,
+        "endLedger": 1100,
+        "filters": [
+          {
+            "type": "contract",
+            "contractIds": [
+              "CABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABA"
+            ]
+          }
+        ],
+        "pagination": {
+          "limit": 2
+        }
+      },
+      "response": {
+        "events": [
+          {
+            "type": "contract",
+            "ledger": 1001,
+            "ledgeClosedAt": "2024-01-01T00:00:00Z",
+            "contractId": "CABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABA",
+            "id": "0000000000000001",
+            "topics": [
+              {
+                "symbol": "deploy"
+              }
+            ],
+            "value": {
+              "string": "v1.0.0"
+            },
+            "inSuccessfulContractCall": true
+          },
+          {
+            "type": "contract",
+            "ledger": 1002,
+            "ledgeClosedAt": "2024-01-01T00:00:05Z",
+            "contractId": "CABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABA",
+            "id": "0000000000000002",
+            "topics": [
+              {
+                "symbol": "upgrade"
+              }
+            ],
+            "value": {
+              "string": "v1.0.1"
+            },
+            "inSuccessfulContractCall": true
+          }
+        ],
+        "latestLedger": 1100,
+        "cursor": "0000000000000002"
+      }
+    },
+    {
+      "request": {
+        "filters": [
+          {
+            "type": "contract",
+            "contractIds": [
+              "CABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABA"
+            ]
+          }
+        ],
+        "pagination": {
+          "cursor": "0000000000000002",
+          "limit": 2
+        }
+      },
+      "response": {
+        "events": [
+          {
+            "type": "contract",
+            "ledger": 1003,
+            "ledgeClosedAt": "2024-01-01T00:00:10Z",
+            "contractId": "CABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABA",
+            "id": "0000000000000003",
+            "topics": [
+              {
+                "symbol": "migrate"
+              }
+            ],
+            "value": {
+              "string": "schema-v2"
+            },
+            "inSuccessfulContractCall": true
+          },
+          {
+            "type": "contract",
+            "ledger": 1004,
+            "ledgeClosedAt": "2024-01-01T00:00:15Z",
+            "contractId": "CABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABA",
+            "id": "0000000000000004",
+            "topics": [
+              {
+                "symbol": "incident"
+              }
+            ],
+            "value": {
+              "string": "degraded-read-path"
+            },
+            "inSuccessfulContractCall": true
+          }
+        ],
+        "latestLedger": 1100,
+        "cursor": "0000000000000004"
+      }
+    },
+    {
+      "request": {
+        "filters": [
+          {
+            "type": "contract",
+            "contractIds": [
+              "CABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABA"
+            ]
+          }
+        ],
+        "pagination": {
+          "cursor": "0000000000000004",
+          "limit": 2
+        }
+      },
+      "response": {
+        "events": [
+          {
+            "type": "contract",
+            "ledger": 1005,
+            "ledgeClosedAt": "2024-01-01T00:00:20Z",
+            "contractId": "CABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABA",
+            "id": "0000000000000005",
+            "topics": [
+              {
+                "symbol": "rollback"
+              }
+            ],
+            "value": {
+              "string": "v1.0.0"
+            },
+            "inSuccessfulContractCall": true
+          }
+        ],
+        "latestLedger": 1100,
+        "cursor": "0000000000000005"
+      }
+    }
+  ],
+  "expected": {
+    "totalEvents": 5,
+    "finalCursor": "0000000000000005",
+    "latestLedger": 1100,
+    "pageCount": 3,
+    "eventIds": [
+      "0000000000000001",
+      "0000000000000002",
+      "0000000000000003",
+      "0000000000000004",
+      "0000000000000005"
+    ]
+  },
+  "terminationCases": [
+    {
+      "name": "no-further-cursor",
+      "description": "The loop stops when a page response omits the top-level cursor.",
+      "pagesConsumed": 3,
+      "expectedEventCount": 5
+    },
+    {
+      "name": "page-cap-reached",
+      "description": "The loop stops when the caller-supplied page cap is reached, even if a further cursor is present.",
+      "pageCap": 2,
+      "expectedEventCount": 4,
+      "expectedCursor": "0000000000000004"
+    },
+    {
+      "name": "latest-ledger-passed",
+      "description": "The loop stops when the cursor ledger exceeds the reported latestLedger.",
+      "latestLedger": 1002,
+      "expectedEventCount": 2,
+      "expectedCursor": "0000000000000002"
+    }
+  ],
+  "validationCases": [
+    {
+      "name": "cursor-with-start-ledger",
+      "description": "A request carrying cursor together with startLedger must be rejected client-side.",
+      "request": {
+        "startLedger": 1000,
+        "pagination": {
+          "cursor": "0000000000000002",
+          "limit": 2
+        }
+      },
+      "expectedError": "cursor cannot be combined with startLedger or endLedger"
+    },
+    {
+      "name": "cursor-with-end-ledger",
+      "description": "A request carrying cursor together with endLedger must be rejected client-side.",
+      "request": {
+        "endLedger": 1100,
+        "pagination": {
+          "cursor": "0000000000000002",
+          "limit": 2
+        }
+      },
+      "expectedError": "cursor cannot be combined with startLedger or endLedger"
+    }
+  ]
+}
