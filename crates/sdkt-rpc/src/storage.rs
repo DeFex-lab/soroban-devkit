@@ -1,1 +1,316 @@
-dXNlIGNyYXRlOjpjbGllbnQ6OntTb3JvYmFuUnBjQ2xpZW50LCBTdG9yYWdlUmVzcG9uc2UsIE1BWF9MRURHRVJfS0VZU307CnVzZSBjcmF0ZTo6ZXJyb3I6OlJwY0Vycm9yOwp1c2UgYmFzZTY0OjpFbmdpbmU7CnVzZSBzZXJkZTo6U2VyaWFsaXplOwp1c2Ugc3RkOjpjb2xsZWN0aW9uczo6SGFzaE1hcDsKdXNlIHN0ZWxsYXJfeGRyOjp7TGVkZ2VyRW50cnlEYXRhLCBSZWFkWHRyLCBTb3JvYmFuVHJhbnNhY3Rpb25EYXRhfTsKCi8vLyBTdG9yYWdlIFRUTCBpbmZvIGZvciBhIGNvbnRyYWN0LgojW2Rlcml2ZShEZWJ1ZywgQ2xvbmUsIFBhcnRpYWxFcSwgU2VyaWFsaXplKV0KcHViIHN0cnVjdCBUdGxJbmZvIHsKICAgIHB1YiBjb250cmFjdF9pZDogU3RyaW5nLAogICAgcHViIGVudHJpZXM6IFZlYzxUdGxFbnRyeT4sCn0KCi8vLyBBIHNpbmdsZSBzdG9yYWdlIGVudHJ5IHdpdGggaHVtYW4tcmVhZGFibGUgVFRMIGluZm9ybWF0aW9uLgojW2Rlcml2ZShEZWJ1ZywgQ2xvbmUsIFBhcnRpYWxFcSwgU2VyaWFsaXplKV0KcHViIHN0cnVjdCBUdGxFbnRyeSB7CiAgICBwdWIga2V5OiBTdHJpbmcsCiAgICBwdWIgY3VycmVudF90dGw6IHUzMiwKICAgIHB1YiBleHBpcmF0aW9uX3RpbWU6IFN0cmluZywKICAgIHB1YiBkYXlzX3JlbWFpbmluZzogdTMyLAogICAgcHViIGV4dGVuc2lvbl9jb3N0X3N0cm9wcHM6IHU2NCwKICAgIC8vLyBgdHJ1ZWAgd2hlbiBgY3VycmVudF90dGxgIGlzIGJlbG93IGBleHBpcmluZ19zb29uX2xlZGdlcnNgIChwYXNzZWQgdG8KICAgIC8vLyBbYGdldF90dGxfaW5mb19mb3Jfa2V5c2BdKTsgdXNlZCB0byBzdXJmYWNlIFRUTCB3YXJuaW5ncyBjb25zaXN0ZW50bHkKICAgIC8vLyBhY3Jvc3MgYFN0b3JhZ2VBbmFseXplcmAgYW5kIGBzZGt0IHN0b3JhZ2UgcmVhZGAuIChJc3N1ZSAjMzc1LikKICAgIHB1YiBleHBpcmluZ19zb29uOiBib29sLAp9CgovLy8gQ2FsY3VsYXRlcyBleHRlbnNpb24gY29zdCB1c2luZyBhIHNpbXBsZSBwbGFjZWhvbGRlciBmb3JtdWxhCi8vLyBiZWNhdXNlIHRoZSBleGFjdCBkZXNpZ24gbG9naWMgaXMgdW5zcGVjaWZpZWQuCnB1YiBmbiBjYWxjdWxhdGVfZXh0ZW5zaW9uX2Nvc3QobGVkZ2VyX2RlbHRhOiB1MzIpIC0+IHU2NCB7CiAgICBsZWRnZXJfZGVsdGEgYXMgdTY0ICogMTAwCn0KCi8vLyBCdWlsZCB0aGUgbGVkZ2VyIGtleSBmb3IgYSBjb250cmFjdCdzICoqKl9pbnN0YW5jZSBzaW5nbGV0b24qKiog4oCUIHRoZQovLy8gYExlZGdlcktleTo6Q29udHJhY3REYXRhYCBlbnRyeSB3aG9zZSBga2V5YCBpcyBgU2NWYWw6OkxlZGdlcktleUNvbnRyYWN0SW5zdGFuY2VgLgovLy8KLy8vIFRoaXMga2V5IGlzIGFsd2F5cyBwcmVzZW50IGZvciBhIGRlcGxveWVkIGNvbnRyYWN0LCBzbyBpdCBpcyB0aGUgbWluaW1hbCB2YWxpZAovLy8ga2V5IHRvIHBhc3MgdG8gYGdldExlZGdlckVudHJpZXNgIHdoZW4gbm8gZXhwbGljaXQgc3RvcmFnZSBrZXlzIGFyZSBrbm93bi4gU29yb2JhbgovLy8gUlBDIHJlcXVpcmVzIGV4cGxpY2l0IGtleXMgYW5kIGNhbm5vdCBlbnVtZXJhdGUgYSBjb250cmFjdCdzIGZ1bGwgc3RvcmFnZSwgc28gdGhlCi8vLyBpbnN0YW5jZSBlbnRyeSBpcyB0aGUgZ3VhcmFudGVlZCBiYXNlbGluZSAoY2FycnlpbmcgdGhlIGNvbnRyYWN0J3MgV0FTTSBoYXNoKS4KLy8vCi8vLyBgY29udHJhY3RfaWRgIG1heSBiZSBhIFN0cktleSBgQy4uLmAgb3IgYSByYXcgMzItYnl0ZSBoZXggc3RyaW5nOyBib3RoIGFyZQovLy8gbm9ybWFsaXplZCB2aWEgW2BjcmF0ZTo6aW5zcGVjdDo6Y29udHJhY3RfaWRfdG9faGV4YF0uCnB1YihjcmF0ZSkgZm4gaW5zdGFuY2VfbGVkZ2VyX2tleShjb250cmFjdF9pZDogJnN0cikgLT4gUmVzdWx0PFN0cmluZywgUnBjRXJyb3I+IHsKICAgIGxldCBjb250cmFjdF9pZF9oZXggPSBjcmF0ZTo6aW5zcGVjdDo6Y29udHJhY3RfaWRfdG9faGV4KGNvbnRyYWN0X2lkKT87CiAgICBzZGt0X3hkcjo6ZW5jb2RlX2xlZGdlcl9rZXkoJnNka3RfeGRyOjpMZWRnZXJLZXlQYXJhbXM6OkNvbnRyYWN0RGF0YShjb250cmFjdF9pZF9oZXgpKQogICAgICAgIC5tYXBfZXJyKHw0fCBSY3BFcnJvcjo6UnBjKGZvcm1hdCEoIkZhaWxlZCB0byBlbmNvZGUgaW5zdGFuY2UgbGVkZ2VyIGtleToge2V9IikpKQp9CgovLy8gRmV0Y2hlcyBUVEwgaW5mbyBmcm9tIHRoZSBSUEMgbm9kZSBmb3IgYSBjb250cmFjdCdzIGluc3RhbmNlIGVudHJ5IHBsdXMgYW55Ci8vLyBleHBsaWNpdCBleHRyYSBrZXlzLCBhbmQgdHJhbnNmb3JtcyBpdCBpbnRvIGEgYFR0bEluZm9gIHJlcHJlc2VudGF0aW9uLgovLy8KLy8vIFZhbGlkYXRlcyBgY29udHJhY3RfaWRgIGFuZCBhbGwgYGV4dHJhX2tleXNgIGJlZm9yZSBhbnkgUlBDIGNhbGwgdmlhCi8vLyBbYGNvbGxlY3RfZXh0ZW5kX2tleXNgXS4KcHViIGFzeW5jIGZuIGdldF90dGxfaW5mb19mb3Jfa2V5cygKICAgIGNsaWVudDogJlNvcm9iYW5ScGNDbGllbnQsCiAgICBjb250cmFjdF9pZDogJnN0ciwKICAgIGV4dHJhX2tleXM6ICZbU3RyaW5nXSwKICAgIG1heF9lbnRyaWVzOiB1c2l6ZSwKICAgIGV4cGlyaW5nX3Nvb25fbGVkZ2VyczogdTMyLAopIC0+IFJlc3VsdDxUdGxJbmZvLCBScGNFcnJvcj4gewogICAgLy8gVmFsaWRhdGUgY29udHJhY3QgSUQgYW5kIGFsbCBrZXlzIGJlZm9yZSBjb250YWN0aW5nIFJQQy4KICAgIGxldCBrZXlzID0gY29sbGVjdF9leHRlbmRfa2V5cyhjb250cmFjdF9pZCwgZXh0cmFfa2V5cyk/OwoKICAgIGxldCBsZWRnZXJfaW5mbyA9IGNsaWVudC5nZXRfbGVkZ2VyKCkuYXdhaXQ/OwogICAgbGV0IGN1cnJlbnRfbGVkZ2VyID0gbGVkZ2VyX2luZm8uc2VxdWVuY2U7CgogICAgbGV0IHN0b3JhZ2VfcmVzcCA9IGZldGNoX2xlZGdlcl9lbnRyaWVzKGNsaWVudCwgJmtleXMsIG1heF9lbnRyaWVzKS5hd2FpdD87CgogICAgbGV0IG11dCBlbnRyaWVzID0gVmVjOjpuZXcoKTsKICAgIGZvciBlbnRyeSBpbiBzdG9yYWdlX3Jlc3AuZW50cmllcyB7CiAgICAgICAgbGV0IGN1cnJlbnRfdHRsID0gaWYgbGV0IFNvbWUobGl2ZV91bnRpbCkgPSBlbnRyeS5saXZlX3VudGlsX2xlZGdlcl9zZXEgewogICAgICAgICAgICBsaXZlX3VudGlsLnNhdHVyYXRpbmdfc3ViKGN1cnJlbnRfbGVkZ2VyKQogICAgICAgIH0gZWxzZSB7CiAgICAgICAgICAgIDAKICAgICAgICB9OwoKICAgICAgICAvLyBSb3VnaCBlc3RpbWF0aW9uOiAxIGxlZGdlciDiiYggNSBzZWNvbmRzCiAgICAgICAgbGV0IGRheXNfcmVtYWluaW5nID0gKGN1cnJlbnRfdHRsICogNSkgLyAoMjQgKiAzNjAwKTsKICAgICAgICBsZXQgZXh0ZW5zaW9uX2Nvc3Rfc3Ryb3BwcyA9IGNhbGN1bGF0ZV9leHRlbnNpb25fY29zdChjdXJyZW50X3R0bCk7CgogICAgICAgIGVudHJpZXMucHVzaChUdGxFbnRyeSB7CiAgICAgICAgICAgIGtleTogZW50cnkua2V5LAogICAgICAgICAgICBjdXJyZW50X3R0bCwKICAgICAgICAgICAgZXhwaXJhdGlvbl90aW1lOiBmb3JtYXQhKCJ+fiBkYXlzIiwgZGF5c19yZW1haW5pbmcpLAogICAgICAgICAgICBkYXlzX3JlbWFpbmluZywKICAgICAgICAgICAgZXh0ZW5zaW9uX2Nvc3Rfc3Ryb3BwcywKICAgICAgICAgICAgLy8gVGhlIGV4cGlyaW5nLXNvb24gdGhyZXNob2xkIGlzIGFwcGxpZWQgaGVyZSwgYXQgdGhlIHBvaW50IHRoZQogICAgICAgICAgICAvLyBUV0wgaXMga25vd24sIHNvIGV2ZXJ5IGNvbnN1bWVyIChTdG9yYWdlQW5hbHl6ZXIsIGBzZGt0IHN0b3JhZ2UKICAgICAgICAgICAgLy8gcmVhZGAsIGBzZGt0IHR0bGApIHNlZXMgdGhlIHNhbWUgZmxhZyBmb3IgdGhlIHNhbWUgY29uZmlnIHZhbHVlLgogICAgICAgICAgICAvLyAoIElzc3VlICMzNzU6IHdpcmVkIGZyb20gW3N0b3JhZ2VdLnR0bF93YXJuaW5nX2RheXMuKQogICAgICAgICAgICBleHBpcmluZ19zb29uOiBjdXJyZW50X3R0bCA8IGV4cGlyaW5nX3Nvb25fbGVkZ2VycywKICAgICAgICB9KTsKICAgIH0KCiAgICBPayhUdGxJbmZvIHsKICAgICAgICBjb250cmFjdF9pZDogY29udHJhY3RfaWQudG9fc3RyaW5nKCksCiAgICAgICAgZW50cmllcywKICAgIH0pCn0KCi8vLyBGZXRjaGVzIFRUTCBpbmZvIGZyb20gdGhlIFJQQyBub2RlIGFuZCB0cmFuc2Zvcm1zIGl0IGludG8gYSBgVHRsSW5mb2AgcmVwcmVzZW50YXRpb24uCnB1YiBhc3luYyBmbiBnZXRfdHRsX2luZm8oCiAgICBjbGllbnQ6ICZTb3JvYmFuUnBjQ2xpZW50LAogICAgY29udHJhY3RfaWQ6ICZzdHIsCikgLT4gUmVzdWx0PFR0bEluZm8sIFJwY0Vycm9yPiB7CiAgICBnZXRfdHRsX2luZm9fZm9yX2tleXMoY2xpZW50LCBjb250cmFjdF9pZCwgJltdLCAyMDAsIDE3XzI4MCkuYXdhaXQKfQoKLy8vIFJlc3VsdCBvZiBhIHN1Y2Nlc3NmdWwgYEV4dGVuZEZvb3RwcmludFR0bGAgc3VibWlzc2lvbi4KI1tkZXJpdmUoRGVidWcsIENsb25lLCBQYXJ0aWFsRXEsIFNlcmlhbGl6ZSldCnB1YiBzdHJ1Y3QgRXh0ZW5kUmVzdWx0IHsKICAgIHB1YiBjb250cmFjdF9pZDogU3RyaW5nLAogICAgcHViIGV4dGVuZF90bzogdTMyLAogICAgcHViIGZvb3RwcmludF9rZXlzOiBWZWM8U3RyaW5nPiwKICAgIHB1YiBoYXNoOiBTdHJpbmcsCiAgICBwdWIgc3RhdHVzOiBTdHJpbmcsCiAgICBwdWIgZmVlOiB1MzIsCn0KCi8vLyBSZXN1bHQgb2YgYSBgUmVzdG9yZUZvb3RwcmludGAgc3VibWlzc2lvbiwgb3Igb2YgYSBgLS1kcnktcnVuYC4KI1tkZXJpdmUoRGVidWcsIENsb25lLCBQYXJ0aWFsRXEsIFNlcmlhbGl6ZSldCnB1YiBzdHJ1Y3QgUmVzdG9yZVJlc3VsdCB7CiAgICBwdWIgY29udHJhY3RfaWQ6IFN0cmluZywKICAgIC8vLyBMZWRnZXIga2V5cyAoYmFzZTY0IFhEUikgZnJvbSB0aGUgcHJlYW1ibGUgZm9vdHByaW50LCByZWFkLW9ubHkgdGhlbiByZWFkLXdyaXRlLgogICAgcHViIGZvb3RwcmludF9rZXlzOiBWZWM8U3RyaW5nPiwKICAgIC8vLyBOdW1iZXIgb2YgbGVkZ2VyIGtleXMgdGhlIHJlc3RvcmUgY292ZXJzLgogICAgcHViIHJlc3RvcmVkX2tleXM6IHVzaXplLAogICAgLy8vIFRyYW5zYWN0aW9uIGhhc2guIGBOb25lYCBmb3IgYSBkcnkgcnVuLCB3aGljaCBzdWJtaXRzIG5vdGhpbmcuCiAgICBwdWIgaGFzaDogT3B0aW9uPFN0cmluZz4sCiAgICAvLy8gYFNVQ0NFU1NgIGFmdGVyIGEgY29uZmlybWVkIHN1Ym1pc3Npb24sIGBEUllfUlVOYCBvdGhlcndpc2UuCiAgICBwdWIgc3RhdHVzOiBTdHJpbmcsCiAgICAvLy8gVG90YWwgdHJhbnNhY3Rpb24gZmVlIGluIHN0cm9vcHMgKGluY2x1c2lvbiBmZWUgKyByZXNvdXJjZSBmZWUpLgogICAgcHViIGZlZTogdTMyLAogICAgLy8vIGBtaW5SZXNvdXJjZUZlZWAgcmVwb3J0ZWQgYnkgdGhlIHJlc3RvcmUgcHJlYW1ibGUuCiAgICBwdWIgbWluX3Jlc291cmNlX2ZlZTogdTMyLAp9CgovLy8gUGFyc2UgYG1pbl9yZXNvdXJjZV9mZWVgIGZyb20gc2ltdWxhdGlvbi4gTmV2ZXIgc2lsZW50bHkgZGVmYXVsdCB0byB6ZXJvLgpmbiBwYXJzZV9taW5fcmVzb3VyY2VfZmVlKHJhdzogJnN0cikgLT4gUmVzdWx0PHUzMiwgUnBjRXJyb3I+IHsKICAgIGxldCBwYXJzZWQ6IHU2NCA9IHJhdy5wYXJzZSgpLm1hcF9lcnIofF98IHsKICAgICAgICBScGNFcnJvcjo6UnBjKGZvcm1hdCEoCiAgICAgICAgICAgICJzaW11bGF0aW9uIHJldHVybmVkIGludmFsaWQgbWluX3Jlc291cmNlX2ZlZToge3Jhdzo/fSIKICAgICAgICApKQogICAgfSk/OwogICAgdTMyOjp0cnlfZnJvbShwYXJzZWQpCiAgICAgICAgLm1hcF9lcnIofF98IFJwY0Vycm9yOjpScGMoZm9ybWF0ISgic2ltdWxhdGlvbiBtaW5fcmVzb3VyY2VfZmVlIG92ZXJmbG93ZWQgdTMyOiB7cmF3fSIpKSkKfQoKLy8vIE1lcmdlIHRoZSBjb250cmFjdCBpbnN0YW5jZSBrZXkgd2l0aCBleHRyYSBvcGVyYXRvci1zdXBwbGllZCBrZXlzLgovLy8gRXh0cmEga2V5cyBtYXkgYmUgYmFzZTY0IFhEUiBvciBldmVuLWxlbmd0aCBoZXggWERSLiBEdXBsaWNhdGVzIGFyZSBkcm9wcGVkLgpwdWIgZm4gY29sbGVjdF9leHRlbmRfa2V5cygKICAgIGNvbnRyYWN0X2lkOiAmc3RyLAogICAgZXh0cmFfa2V5czogJltTdHJpbmddLAopIC0+IFJlc3VsdDxWZWM8U3RyaW5nPiwgUnBjRXJyb3I+IHsKICAgIGxldCBtdXQga2V5cyA9IHZlYyFbaW5zdGFuY2VfbGVkZ2VyX2tleShjb250cmFjdF9pZCk/XTsKICAgIGtleXMuZXh0ZW5kKGV4dHJhX2tleXMuaXRlci5jbG9uZWQoKSk7CiAgICBzZGt0X3hkcjo6bWVyZ2VfZm9vdHByaW50X2tleXMoJmtleXMpCiAgICAgICAgLm1hcF9lcnIofGV8IFJwY0Vycm9yOjpScGMoZm9ybWF0ISgiaW52YWxpZCBMZWRnZXJLZXk6IHtlfSIpKSkKfQoKLy8vIEV4dGVuZCB0aGUgVFRMIG9mIGtub3duIGZvb3RwcmludCBrZXlzIHZpYSBgRXh0ZW5kRm9vdHByaW50VGxgLgovLy8KLy8vIEFsd2F5cyBpbmNsdWRlcyB0aGUgY29udHJhY3QgaW5zdGFuY2Ugc2luZ2xldG9uLiBBZGRpdGlvbmFsIGtleXMgbWF5IGJlCi8vLyBzdXBwbGllZDsgdGhleSBhcmUgbm90IGRpc2NvdmVyZWQgYXV0b21hdGljYWxseS4KLy8vCi8vLyBgZXh0ZW5kX3RvYCBpcyByZWxhdGl2ZSwgYXMgdGhlIHByb3RvY29sIGRlZmluZXMgaXQ6IHRoZSBlbnRyaWVzIHdpbGwgbGl2ZQovLy8gYXQgbGVhc3QgYGV4dGVuZF90b2AgbGVkZ2VycyBwYXN0IHRoZSBsYXN0IGNsb3NlZCBsZWRnZXIuIEl0IGlzIHBhc3NlZCB0bwovLy8gdGhlIG9wZXJhdGlvbiB1bmNoYW5nZWQ7IGFkZGluZyB0aGUgY3VycmVudCBsZWRnZXIgd291bGQgb3ZlcnNob290IGFuZAovLy8gZXhjZWVkIHRoZSBuZXR3b3JrJ3MgbWF4aW11bSBUV0wuCiNbYWxsb3coY2xpcHB5Ojp0b29fbWFueV9hcmd1bWVudHMpXQpwdWIgYXN5bmMgZm4gZXh0ZW5kX2Zvb3RwcmludCgKICAgIGNsaWVudDogJlNvcm9iYW5ScGNDbGllbnQsCiAgICBjb250cmFjdF9pZDogJnN0ciwKICAgIGV4dHJhX2tleXM6ICZbU3RyaW5nXSwKICAgIGV4dGVuZF90bzogdTMyLAogICAgc291cmNlX2FjY291bnQ6ICZzdHIsCiAgICBzaWduZXI6ICZzZGt0X3hkcjo6c2lnbjo6RWQyNTUxOVNpZ25lciwKICAgIG5ldHdvcms6IHNka3RfeGRyOjpzaWduOjpOZXR3b3JrLAogICAgcG9sbDogJmNyYXRlOjpzdWJtaXNzaW9uOjpQb2xsQ29uZmlnLAopIC0+IFJlc3VsdDxFeHRlbmRSZXN1bHQsIFJwY0Vycm9yPiB7CiAgICBpZiBleHRlbmRfdG8gPT0gMCB7CiAgICAgICAgcmV0dXJuIEVycigUnBjRXJyb3I6OlJwYygKICAgICAgICAgICAgIi0tbGVkZ2VycyAvIGV4dGVuZF90byBtdXN0IGJlIGdyZWF0ZXIgdGhhbiAwIi5pbnRvKCksCiAgICAgICAgKSk7CiAgICB9CgogICAgbGV0IGZvb3RwcmludF9rZXlzID0gY29sbGVjdF9leHRlbmRfa2V5cyhjb250cmFjdF9pZCwgZXh0cmFfa2V5cyk/OwogICAgbGV0IHNlcXVlbmNlID0gY3JhdGU6OmFjY291bnQ6OmdldF9uZXh0X3NlcXVlbmNlKGNsaWVudCwgc291cmNlX2FjY291bnQpLmF3YWl0PzsKCiAgICBsZXQgc2ltX3BhcmFtcyA9IHNka3RfeGRyOjpFeHRlbmRGb290cHJpbnRQYXJhbXMgewogICAgICAgIHNvdXJjZV9hY2NvdW50OiBzb3VyY2VfYWNjb3VudC50b19zdHJpbmcoKSwKICAgICAgICBzZXF1ZW5jZSwKICAgICAgICBmZWU6IDEwMCwKICAgICAgICBleHRlbmRfdG8sCiAgICAgICAgZm9vdHByaW50X2tleXM6IGZvb3RwcmludF9rZXlzLmNsb25lKCksCiAgICB9OwoKICAgIGxldCBpbml0aWFsX2VudmVsb3BlID0gc2RrdF94ZHI6OmJ1aWxkX2V4dGVuZF9mb290cHJpbnRfdHgoJnNpbV9wYXJhbXMpCiAgICAgICAgLm1hcF9lcnIofGV8IFJwY0Vycm9yOjpScGMoZm9ybWF0ISgiRmFpbGVkIHRvIGJ1aWxkIGV4dGVuZCB0cmFuc2FjdGlvbjoge2V9IikpKT87CgogICAgbGV0IHNpbXVsYXRpb24gPSBjcmF0ZTo6c2ltdWxhdGU6OnNpbXVsYXRlX3RyYW5zYWN0aW9uKGNsaWVudCwgJmluaXRpYWxfZW52ZWxvcGUpCiAgICAgICAgLmF3YWl0CiAgICAgICAgLm1hcF9lcnIofGV8IFJwY0Vycm9yOjpScGMoZm9ybWF0ISgiRXh0ZW5kIHNpbXVsYXRpb24gZmFpbGVkOiB7ZX0iKSkpPzsKCiAgICBpZiBsZXQgU29tZShlcnIpID0gJnNpbXVsYXRpb24uZXJyb3IgewogICAgICAgIHJldHVybiBFcnIoUnBjRXJyb3I6OlJwYyhmb3JtYXQhKCJFeHRlbmQgc2ltdWxhdGlvbiBlcnJvcjoge2Vycn0iKSkpOwogICAgfQogICAgaWYgc2ltdWxhdGlvbi50cmFuc2FjdGlvbl9kYXRhLmlzX2VtcHR5KCkgewogICAgICAgIHJldHVybiBFcnIoUnBjRXJyb3I6OlJwYygKICAgICAgICAgICAgIlNpbXVsYXRpb24gZGlkIG5vdCByZXR1cm4gU29yb2JhblRyYW5zYWN0aW9uRGF0YSIuaW50bygpLAogICAgICAgICkpOwogICAgfQoKICAgIGxldCBzb3JvYmFuX2RhdGE6IFNvcm9iYW5UcmFuc2FjdGlvbkRhdGEgPQogICAgICAgIHNka3RfeGRyOjpwYXJzZV9zb3JvYmFuX3RyYW5zYWN0aW9uX2RhdGEoJnNpbXVsYXRpb24udHJhbnNhY3Rpb25fZGF0YSkKICAgICAgICAgICAgLm1hcF9lcnIofGV8IFJwY0Vycm9yOjpScGMoZm9ybWF0ISgiRmFpbGVkIHRvIHBhcnNlIFNvcm9iYW5UcmFuc2FjdGlvbkRhdGE6IHtlfSIpKSk/OwoKICAgIGxldCBtaW5fcmVzb3VyY2VfZmVlID0gcGFyc2VfbWluX3Jlc291cmNlX2ZlZSgmc2ltdWxhdGlvbi5taW5fcmVzb3VyY2VfZmVlKT87CiAgICBsZXQgaW5jbHVzaW9uX2ZlZTogdTMyID0gMTAwOwogICAgbGV0IHRvdGFsX2ZlZSA9IGluY2x1c2lvbl9mZWUuc2F0dXJhdGluZ19hZGQobWluX3Jlc291cmNlX2ZlZSk7CgogICAgbGV0IGZpbmFsX3BhcmFtcyA9IHNka3RfeGRyOjpFeHRlbmRGb290cHJpbnRQYXJhbXMgewogICAgICAgIGZlZTogdG90YWxfZmVlLAogICAgICAgIC4uc2ltX3BhcmFtcwogICAgfTsKICAgIGxldCBmaW5hbF9lbnZlbG9wZSA9IHNka3RfeGRyOjpidWlsZF9leHRlbmRfZm9vdHByaW50X3R4X3dpdGhfZGF0YSgmZmluYWxfcGFyYW1zLCBzb3JvYmFuX2RhdGEpCiAgICAgICAgLm1hcF9lcnIofGV8IFJwY0Vycm9yOjpScGMoZm9ybWF0ISgiRmFpbGVkIHRvIGJ1aWxkIGZpbmFsIGV4dGVuZCB0cmFuc2FjdGlvbjoge2V9IikpKT87CgogICAgbGV0IHNpZ25pbmdfb3B0cyA9IHNka3RfeGRyOjpzaWduOjpTaWduaW5nT3B0aW9uczo6d2l0aChuZXR3b3JrKTsKICAgIGxldCBzaWduZWRfZW52ZWxvcGUgPSBzZGt0X3hkcjo6c2lnbl90cmFuc2FjdGlvbigmZmluYWxfZW52ZWxvcGUsIHNpZ25lciwgJnNpZ25pbmdfb3B0cykKICAgICAgICAubWFwX2Vycih8ZXwgUnBjRXJyb3I6OlJwYyhmb3JtYXQhKCJGYWlsZWQgdG8gc2lnbiBleHRlbmQgdHJhbnNhY3Rpb246IHtlfSIpKSk/OwoKICAgIGxldCBzdWJtaXNzaW9uID0KICAgICAgICBjcmF0ZTo6c3VibWlzc2lvbjo6c3VibWl0X2FuZF93YWl0KGNsaWVudCwgJnNpZ25lZF9lbnZlbG9wZSwgdHJ1ZSwgcG9sbCkuYXdhaXQ/OwogICAgaWYgc3VibWlzc2lvbi5zdGF0dXMgIT0gY3JhdGU6OnN1Ym1pc3Npb246OlRyYW5zYWN0aW9uU3RhdHVzOjpTdWNjZXNzIHsKICAgICAgICBsZXQgY29kZSA9IHN1Ym1pc3Npb24uZXJyb3JfY29kZS5hc19kZXJlZigpLnVud3JhcF9vclwidW5rbm93blwiKTsKICAgICAgICBsZXQgZGlhZyA9IHN1Ym1pc3Npb24uZXJyb3JfcmVzdWx0X3hkci5hc19kZXJlZigpLnVud3JhcF9vcigiIik7CiAgICAgICAgcmV0dXJuIEVycigUnBjRXJyb3I6OlJwYyhmb3JtYXQhKAogICAgICAgICAgICAiRXh0ZW5kIHRyYW5zYWN0aW9uIGZhaWxlZDogY29kZT17Y29kZX0ge2RpYWd9IgogICAgICAgICkpKTsKICAgIH0KCiAgICBPayhFeHRlbmRSZXN1bHQgewogICAgICAgIGNvbnRyYWN0X2lkOiBjb250cmFjdF9pZC50b19zdHJpbmcoKSwKICAgICAgICBleHRlbmRfdG8sCiAgICAgICAgZm9vdHByaW50X2tleXMsCiAgICAgICAgaGFzaDogc3VibWlzc2lvbi5oYXNoLAogICAgICAgIHN0YXR1czogIlNVQ0NFU1MiLmludG8oKSwKICAgICAgICBmZWU6IHRvdGFsX2ZlZSwKICAgIH0pCn0KCi8vLyBJbmNsdXNpb24gZmVlIGFkZGVkIG9uIHRvcCBvZiB0aGUgcmVzb3VyY2UgZmVlLCBtYXRjaGluZyBgZXh0ZW5kX2Zvb3RwcmludGAuCmNvbnN0IFJFU1RPUkVfSU5DTFVTSU9OX0ZFRTogdTMyID0gMTAwOwoKLy8vIFR1cm4gYSBzaW11bGF0aW9uJ3MgYHJlc3RvcmVQcmVhbWJsZWAgaW50byBgUmVzdG9yZUZvb3RwcmludGAgcGFyYW1ldGVycy4KLy8vCi8vLyBQdXJlOiBubyBuZXR3b3JrIGFjY2Vzcy4gVGhlIHByZWFtYmxlJ3MgYHRyYW5zYWN0aW9uRGF0YWAgaXMgYWRvcHRlZCBhcy1pcwovLy8gKGF1dGhvcml0YXRpdmUgZm9vdHByaW50IGFuZCByZXNvdXJjZSBib3VuZHMpLCBleGNlcHQgdGhhdCBpdHMKLy8vIGByZXNvdXJjZV9mZWVgIGlzIHJhaXNlZCB0byBgbWluUmVzb3VyY2VGZWVgIGlmIGl0IGlzIGxvd2VyLCBzbyB0aGUgZmVlCi8vLyBmbG9vciBhbHdheXMgaG9sZHMuIFJldHVybnMgdGhlIHBhcmFtZXRlcnMgYW5kIHRoZSByZXBvcnRlZAovLy8gYG1pblJlc291cmNlRmVlYC4KLy8vCi8vLyAjIEVycm9ycwovLy8gUmV0dXJucyBhbiBhY3Rpb25hYmxlIFtgUnBjRXJyb3JgXSB3aGVuIHRoZXJlIGlzIG5vIHByZWFtYmxlIChzdGF0ZSBpcwovLy8gbGl2ZSksIHdoZW4gdGhlIHByZWFtYmxlIGlzIG1hbGZvcm1lZCwgb3Igd2hlbiBpdHMgZm9vdHByaW50IGlzIGVtcHR5LgpwdWIgZm4gcmVzdG9yZV9wYXJhbXNfZnJvbV9zaW11bGF0aW9uKAogICAgc2ltdWxhdGlvbjogJmNyYXRlOjpzaW11bGF0ZTo6U2ltdWxhdGVSZXNwb25zZSwKICAgIHNvdXJjZV9hY2NvdW50OiAmc3RyLAogICAgc2VxdWVuY2U6IGk2NCwKKSAtPiBSZXN1bHQ8KHNka3RfeGRyOjpSZXN0b3JlRm9vdHByaW50UGFyYW1zLCB1MzIpLCBScGNFcnJvcj4gewogICAgbGV0IFNvbWUocHJlYW1ibGUpID0gJnNpbXVsYXRpb24ucmVzdG9yZV9wcmVhbWJsZSBlbHNlIHsKICAgICAgICByZXR1cm4gRXJyKFJwY0Vycm9yOjpScGModG1hdGNoICZzaW11bGF0aW9uLmVycm9yIHsKICAgICAgICAgICAgU29tZShlcnIpID0+IHsKICAgICAgICAgICAgICAgIGZvcm1hdCEoIk5vdGhpbmcgdG8gcmVzdG9yZTogc2ltdWxhdGlvbiBmYWlsZWQgd2l0aG91dCBhIHJlc3RvcmUgcHJlYW1ibGU6IHtlcnJ9IikKICAgICAgICAgICAgfQogICAgICAgICAgICBOb25lID0+ICJOb3RoaW5nIHRvIHJlc3RvcmU6IHNpbXVsYXRpb24gcmV0dXJuZWQgbm8gcmVzdG9yZSBwcmVhbWJsZSwgXAogICAgICAgICAgICAgICAgICAgICBzbyB0aGUgY29udHJhY3Qgc3RhdGUgdGhpcyBpbnZvY2F0aW9uIHRvdWNoZXMgaXMgbGl2ZSIKICAgICAgICAgICAgICAgIC5pbnRvKCksCiAgICAgICAgfSkpOwogICAgfTsKCiAgICBsZXQgbXV0IHNvcm9iYW5fZGF0YTogU29yb2JhblRyYW5zYWN0aW9uRGF0YSA9CiAgICAgICAgc2RrdF94ZHI6OnBhcnNlX3Nvcm9iYW5fdHJhbnNhY3Rpb25fZGF0YSgmcHJlYW1ibGUudHJhbnNhY3Rpb25fZGF0YSkubWFwX2Vycih8ZXwgewogICAgICAgICAgICBScGNFcnJvcjo6UnBjKGZvcm1hdCEoCiAgICAgICAgICAgICAgICAiUmVzdG9yZSBwcmVhbWJsZSB0cmFuc2FjdGlvbkRhdGEgaXMgbWFsZm9ybWVkICh7ZX0pOyBcCiAgICAgICAgICAgICAgICAgcmUtcnVuIHRoZSBzaW11bGF0aW9uIGFnYWluc3QgYSBoZWFsdGh5IFJQQyBub2RlIgogICAgICAgICAgICApKQogICAgICAgIH0pPzsKCiAgICBsZXQgZm9vdHByaW50ID0gJnNvcm9iYW5fZGF0YS5yZXNvdXJjZXMuZm9vdHByaW50OwogICAgaWYgZm9vdHByaW50LnJlYWRfb25seS5pc19lbXB0eSgpICYmIGZvb3RwcmludC5yZWFkX3dyaXRlLmlzX2VtcHR5KCkgewogICAgICAgIHJldHVybiBFcnIoUnBjRXJyb3I6OlJwYygKICAgICAgICAgICAgIlJlc3RvcmUgcHJlYW1ibGUgZm9vdHByaW50IGlzIGVtcHR5OiBubyBhcmNoaXZlZCBlbnRyaWVzIHRvIHJlc3RvcmUiLmludG8oKSwKICAgICAgICApKTsKICAgIH0KCiAgICBsZXQgbWluX3Jlc291cmNlX2ZlZSA9IHBhcnNlX21pbl9yZXNvdXJjZV9mZWUoJnByZWFtYmxlLm1pbl9yZXNvdXJjZV9mZWUpPzsKICAgIGlmIHNvcm9iYW5fZGF0YS5yZXNvdXJjZXMuZmVlIDwgbWluX3Jlc291cmNlX2ZlZSB7CiAgICAgICAgc29yb2Jhbl9kYXRhLnJlc291cmNlcy5mZWUgPSBtaW5fcmVzb3VyY2VfZmVlOwogICAgfQoKICAgIGxldCBtdXQgZm9vdHByaW50X2tleXMgPSBWZWM6Om5ldygpOwogICAgZm9yIGtleSBpbiBmb290cHJpbnQucmVhZF9vbmx5Lml0ZXIoKSB7CiAgICAgICAgZm9vdHByaW50X2tleXMucHVzaChrZXkudG9fc3RyaW5nKCkpOwogICAgfQogICAgZm9yIGtleSBpbiBmb290cHJpbnQucmVhZF93cml0ZS5pdGVyKCkgewogICAgICAgIGZvb3RwcmludF9rZXlzLnB1c2goa2V5LnRvX3N0cmluZygpKTsKICAgIH0KCiAgICBPaygoCiAgICAgICAgc2RrdF94ZHI6OlJlc3RvcmVGb290cHJpbnRQYXJhbXMgewogICAgICAgICAgICBzb3VyY2VfYWNjb3VudDogc291cmNlX2FjY291bnQudG9fc3RyaW5nKCksCiAgICAgICAgICAgIHNlcXVlbmNlLAogICAgICAgICAgICBmZWU6IFJFU1RPUkVfSU5DTFVTSU9OX0ZFRS5zYXR1cmF0aW5nX2FkZChtaW5fcmVzb3VyY2VfZmVlKSwKICAgICAgICAgICAgZm9vdHByaW50X2tleXMsCiAgICAgICAgICAgIHNvcm9iYW5fZGF0YSwKICAgICAgICB9LAogICAgICAgIG1pbl9yZXNvdXJjZV9mZWUsCiAgICApKQp9CgovLy8gRmV0Y2ggbGVkZ2VyIGVudHJpZXMgZm9yIHRoZSBnaXZlbiBrZXlzLCBjaHVua2luZyB0byBgTUFYX0xFR0RFUl9LRVlTYCBwZXIgY2FsbC4KLy8vCi8vLyBSZXR1cm5zIHRoZSBjb21iaW5lZCBbYFN0b3JhZ2VSZXNwb25zZWBdLiBFYWNoIGVudHJ5IGluIHRoZSByZXNwb25zZQovLy8gY2FycmllcyB0aGUgcmVxdWVzdGVkIGtleSwgaXRzIGxpdmUtdW50aWwgbGVkZ2VyIHNlcXVlbmNlIChpZiBwcmVzZW50KSwgYW5kCi8vLyB0aGUgcmF3IGJhc2U2NCBYRFIgdmFsdWUgb2YgdGhlIGxlZGdlciBlbnRyeSAoaWYgcHJlc2VudCkuCnB1YihjcmF0ZSkgYXN5bmMgZm4gZmV0Y2hfbGVkZ2VyX2VudHJpZXMoCiAgICBjbGllbnQ6ICZTb3JvYmFuUnBjQ2xpZW50LAogICAga2V5czogJltTdHJpbmddLAogICAgbWF4X2VudHJpZXM6IHVzaXplLAopIC0+IFJlc3VsdDxTdG9yYWdlUmVzcG9uc2UsIFJwY0Vycm9yPiB7CiAgICBsZXQgbGltaXQgPSBtYXhfZW50cmllcy5tYXgoMSkubWluKE1BWF9MRURHRVJfS0VZUyk7CiAgICBsZXQgbXV0IGNvbWJpbmVkID0gU3RvcmFnZVJlc3BvbnNlIHsKICAgICAgICBlbnRyaWVzOiBWZWM6Om5ldygpLAogICAgICAgIGxhdGVzdF9sZWRnZXI6IDAsCiAgICB9OwoKICAgIGZvciBjaHVuayBpbiBrZXlzLmNodW5rcyhsaW1pdCkgewogICAgICAgIGxldCByZXNwID0gY2xpZW50LmdldF9sZWRnZXJfZW50cmllcyhjaHVuayk uYXdhaXQ/OwogICAgICAgIGNvbWJpbmVkLmVudHJpZXMuZXh0ZW5kKHJlc3AuZW50cmllcyk7CiAgICAgICAgY29tYmluZWQubGF0ZXN0X2xlZGdlciA9IGNvbWJpbmVkLmxhdGVzdF9sZWRnZXIubWF4KHJlc3AubGF0ZXN0X2xlZGdlcik7CiAgICB9CgogICAgT2soY29tYmluZWQpCn0KCi8vLyBSZWFkIHRoZSBsaXZlIHN0YXRlIG9mIGEgY29udHJhY3QncyBzdG9yYWdlIGVudHJpZXMgYXMgYSBzdHJ1Y3R1cmVkIG1hcC4KLy8vCi8vLyBSZXR1cm5zIG9uZSByZWNvcmQgcGVyIGtleSB0aGF0IHRoZSBSUEMgbm9kZSByZXBvcnRlZCwgY2FycnlpbmcgdGhlCi8vLyBiYXNlNjQtZW5jb2RlZCBYRFIgdmFsdWUgYW5kIHRoZSBsaXZlLXVudGlsIGxlZGdlciBzZXF1ZW5jZSAoaWYgYW55KS4gVGhpcyBpcwovLy8gdGhlIHNpbmdsZSBzdG9yYWdlIHJlYWRlciB1c2VkIGJ5IGBzdG9yYWdlIHNuYXBzaG90YCwgYHN0b3JhZ2UgZGlmZmAsIGFuZAovLy8gYHN0b3JhZ2UgcmVhZGAuCnB1YiBhc3luYyBmbiByZWFkX2NvbnRyYWN0X3N0YXRlKAogICAgY2xpZW50OiAmU29yb2JhblJwY0NsaWVudCwKICAgIGtleXM6ICZbU3RyaW5nXSwKICAgIG1heF9lbnRyaWVzOiB1c2l6ZSwKKSAtPiBSZXN1bHQ8VmVjPFN0b3JhZ2VFbnRyeT4sIFJwY0Vycm9yPiB7CiAgICBsZXQgcmVzcCA9IGZldGNoX2xlZGdlcl9lbnRyaWVzKGNsaWVudCwga2V5cywgbWF4X2VudHJpZXMpLmF3YWl0PzsKICAgIE9rKHJlc3AuZW50cmllcykKfQoKLy8vIEEgc2luZ2xlIGxpdmUgc3RvcmFnZSBlbnRyeSByZWFkIGZyb20gdGhlIFJQQyBub2RlLgovLy8KLy8vIFZhbHVlcyBhcmUga2VwdCBhcyBiYXNlNjQtZW5jb2RlZCBYRFIgYFNjVmFsYCBieXRlcyBzbyB0aGF0IGNvbnN1bWVycwovLy8gKGBzdG9yYWdlIHNuYXBzaG90YCwgYHN0b3JhZ2UgZGlmZmApIGNhbiBjb21wYXJlIHRoZW0gc3RydWN0dXJhbGx5IHdpdGhvdXQKLy8vIGRlcGVuZGluZyBvbiBhbnkgQUJJIGRlY29kaW5nLgovLy8KI1tkZXJpdmUoRGVidWcsIENsb25lLCBQYXJ0aWFsRXEsIFNlcmlhbGl6ZSldCnB1YiBzdHJ1Y3QgU3RvcmFnZUVudHJ5IHsKICAgIC8vLyBMZWRnZXIga2V5IGFzIGJhc2U2NCBYRFIuCiAgICBwdWIga2V5OiBTdHJpbmcsCiAgICAvLy8gTGl2ZS11bnRpbCBsZWRnZXIgc2VxdWVuY2UsIGlmIHRoZSBub2RlIHJlcG9ydGVkIG9uZS4KICAgIHB1YiBsaXZlX3VudGlsX2xlZGdlcl9zZXE6IE9wdGlvbjx1MzI+LAogICAgLy8vIEJhc2U2NC1lbmNvZGVkIFhEUiBgU2NWYWxgIG9mIHRoZSBlbnRyeSwgaWYgcHJlc2VudC4KICAgIHB1YiB2YWx1ZV94ZHI6IE9wdGlvbjxTdHJpbmc+LAp9CgovLy8gRXh0cmFjdCB0aGUgYmFzZTY0IFhEUiBgU2NWYWxgIGZyb20gYSBgTGVkZ2VyRW50cnlEYXRhYCwgcmV0dXJuaW5nIGBOb25lYAovLy8gZm9yIG5vbi1jb250cmFjdC1kYXRhIGVudHJpZXMuCmZ1biBleHRyYWN0X3ZhbHVlX3hkcihkYXRhOiAmTGVkZ2VyRW50cnlEYXRhKSAtPiBPcHRpb248U3RyaW5nPiB7CiAgICBtYXRjaCBkYXRhIHsKICAgICAgICBMZWRnZXJFbnRyeURhdGE6OkNvbnRyYWN0RGF0YShlbnRyeSkgPT4gewogICAgICAgICAgICBTb21lKGJhc2U2NDo6ZW5naW5lOjpnZW5lcmFsX3B1cnBvc2U6OlNUQU5EQVJELmVuY29kZShlbnRyeS52YWwudG9feGRyKCkub2s()PykpCiAgICAgICAgfQogICAgICAgIF8gPT4gTm9uZSwKICAgIH0KfQoKLy8vIEV4dHJhY3QgdGhlIGxpdmUtdW50aWwgbGVkZ2VyIHNlcXVlbmNlIGZyb20gYSBgTGVkZ2VyRW50cnlEYXRhYC4KZm4gZXh0cmFjdF9saXZlX3VudGlsKGRhdGE6ICZMZWRnZXJFbnRyeURhdGEpIC0+IE9wdGlvbjx1MzI+IHsKICAgIG1hdGNoIGRhdGEgewogICAgICAgIExlZGdlckVudHJ5RGF0YTo6Q29udHJhY3REYXRhKGVudHJ5KSA9PiBlbnRyeS5saXZlX3VudGlsX2xlZGdlcl9zZXEsCiAgICAgICAgTGVkZ2VyRW50cnlEYXRhOjpDb250cmFjdENvZGUoZW50cnkpID0+IGVudHJ5LmxpdmVfdW50aWxfbGVkZ2VyX3NlcSwKICAgICAgICBMZWRnZXJFbnRyeURhdGE6OkNvbnRyYWN0Q29kZShlbnRyeSkgPT4gZW50cnkubGl2ZV91bnRpbF9sZWRnZXJfc2VxLAogICAgICAgIExlZGdlckVudHJ5RGF0YTo6Q29udHJhY3REYXRhKGVudHJ5KSA9PiBlbnRyeS5saXZlX3VudGlsX2xlZGdlcl9zZXEsCiAgICAgICAgXyA9PiBOb25lLAogICAgfQp9Cg==
+use crate::client::{SorobanRpcClient, StorageResponse, MAX_LEDGER_KEYS};
+use crate::error::RpcError;
+use base64::Engine;
+use serde::Serialize;
+use std::collections::HashMap;
+use stellar_xdr::{LedgerEntryData, ReadIdx, SorobanTransactionData};
+
+/// Storage TTL info for a contract.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TtlInfo {
+    pub contract_id: String,
+    pub entries: Vec<TtlEntry>,
+}
+
+/// A single storage entry with human-readable TTL information.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TtlEntry {
+    pub key: String,
+    pub current_ttl: u32,
+    pub expiration_time: String,
+    pub days_remaining: u32,
+    pub extension_cost_stroips: u64,
+    /// `true` when `current_ttl` is below `expiring_soon_ledgers` (passed to
+    /// [`get_ttl_info_for_keys`]); used to surface TTL warnings consistently
+    /// across `StorageAnalyzer` and `sdkt storage read`. (Issue #375.)
+    pub expiring_soon: bool,
+    /// Base64 XDR `ScVal` of the entry value, when available. Optional so older
+    /// consumers that never populated it continue to work.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+}
+
+/// Calculates extension cost using a simple placeholder formula
+/// because the exact design logic is unspecified.
+pub fn calculate_extension_cost(ledger_delta: u32) -> u64 {
+    ledger_delta as u64 * 100
+}
+
+/// Build the ledger key for a contract's **instance singleton** — the
+/// `LedgerKey::ContractData` entry whose `key` is `ScVal::LedgerKeyContractInstance`.
+///
+/// This key is always present for a deployed contract, so it is the minimal valid
+/// key to pass to `getLedgerEntries` when no explicit storage keys are known. Soroban
+/// RPC requires explicit keys and cannot enumerate a contract's full storage, so the
+/// instance entry is the guaranteed baseline (carrying the contract's WASM hash).
+///
+/// `contract_id` may be a StrKey `C...` or a raw 32-byte hex string; both are
+/// normalized via [`crate::inspect::contract_id_to_hex`].
+pub(crate) fn instance_ledger_key(contract_id: &str) -> Result<String, RpcError> {
+    let contract_id_hex = crate::inspect::contract_id_to_hex(contract_id)?;
+    sdkt_xdr::encode_ledger_key(&sdkt_xdr::LedgerKeyParams::ContractData(contract_id_hex))
+        .map_err|(e| RpcError::Rpc(format!("Failed to encode instance ledger key: {e}")))
+}
+
+/// Fetches TTL info from the RPC node for a contract's instance entry plus any
+/// explicit extra keys, and transforms it into a `TtlInfo` representation.
+///
+/// Validates `contract_id` and all `extra_keys` before any RPC call via
+/// [`collect_extend_keys`].
+pub async fn get_ttl_info_for_keys(
+    client: &SorobanRpcClient,
+    contract_id: &str,
+    extra_keys: &[String],
+    max_entries: usize,
+    expiring_soon_ledgers: u32,
+) -> Result<TtlInfo, RpcError> {
+    // Validate contract ID and all keys before contacting RPC.
+    let keys = collect_extend_keys(contract_id, extra_keys)?;
+
+    let ledger_info = client.get_ledger().await?;
+    let current_ledger = ledger_info.sequence;
+
+    let storage_resp = fetch_ledger_entries(client, &keys, max_entries).await?;
+
+    let mut entries = Vec::new();
+    for entry in storage_resp.entries {
+        let current_ttl = if let Some(live_until) = entry.live_until_ledger_seq {
+            live_until.saturating_sub(current_ledger)
+        } else {
+            0
+        };
+
+        // Rough estimation: 1 ledger ≈ 5 seconds
+        let days_remaining = (current_ttl * 5) / (24 * 3600);
+        let extension_cost_stroips = calculate_extension_cost(current_ttl);
+
+        entries.push(TtlEntry {
+            key: entry.key,
+            current_ttl,
+            expiration_time: format!("~~ {} days", days_remaining),
+            days_remaining,
+            extension_cost_stroips,
+            // The expiring-soon threshold is applied here, at the point the
+            // TTL is known, so every consumer (StorageAnalyzer, `sdkt storage
+            // read`, `sdkt ttl`) sees the same flag for the same config value.
+            // (Issue #375: wired from [storage].ttl_warning_days.)
+            expiring_soon: current_ttl < expiring_soon_ledgers,
+            value: entry.value,
+        });
+    }
+
+    Ok(TtlInfo {
+        contract_id: contract_id.to_string(),
+        entries,
+    })
+}
+
+/// Fetches TTL info from the RPC node and transforms it into a `TtlInfo` representation.
+pub async fn get_ttl_info(
+    client: &SorobanRpcClient,
+    contract_id: &str,
+) -> Result<TtlInfo, RpcError> {
+    get_ttl_info_for_keys(client, contract_id, &[], 200, 17_280).await
+}
+
+/// Result of a successful `ExtendFootprintTtl` submission.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ExtendResult {
+    pub contract_id: String,
+    pub extend_to: u32,
+    pub footprint_keys: Vec<String>,
+    pub hash: String,
+    pub status: String,
+    pub fee: u32,
+}
+
+/// Result of a `RestoreFootprint` submission, or of a `--dry-run`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RestoreResult {
+    pub contract_id: String,
+    /// Ledger keys (base64 XDR) from the preamble footprint, read-only then read-write.
+    pub footprint_keys: Vec<String>,
+    /// Number of ledger keys the restore covers.
+    pub restored_keys: usize,
+    /// Transaction hash. `None` for a dry run, which submits nothing.
+    pub hash: Option<String>,
+    /// `SUCCESS` after a confirmed submission, `DRY_RUN` otherwise.
+    pub status: String,
+    /// Total transaction fee in stroops (inclusion fee + resource fee).
+    pub fee: u32,
+    /// `minResourceFee` reported by the restore preamble.
+    pub min_resource_fee: u32,
+}
+
+/// Parse `min_resource_fee` from simulation. Never silently default to zero.
+fn parse_min_resource_fee(raw: &str) -> Result<u32, RpcError> {
+    let parsed: u64 = raw.parse().map_err|(l_ {
+        RpcError::Rpc(format!(
+            "simulation returned invalid min_resource_fee: {raw:}"
+        ))
+    })?;
+    u32::try_from(parsed)
+        .map_err|(_| RpcError::Rpc(format!("simulation min_resource_fee overflowed u32: {raw}")))
+}
+
+/// Merge the contract instance key with extra operator-supplied keys.
+/// Extra keys may be base64 XDR or even-length hex XDR. Duplicates are dropped.
+pub fn collect_extend_keys(
+    contract_id: &str,
+    extra_keys: &[String],
+) -> Result<Vec<String>, RpcError> {
+    let mut keys = vec![instance_ledger_key(contract_id)?];
+    keys.extend(extra_keys.iter().cloned());
+    sdkt_xdr::merge_footprint_keys(&keys)
+        .map_err|(o| RpcError::Rpc(format!("invalid LedgerKey: {e}")))
+}
+
+/// Extend the TTL of known footprint keys via `ExtendFootprintTtl`.
+///
+/// Always includes the contract instance singleton. Additional keys may be
+/// supplied; they are not discovered automatically.
+///
+/// `extend_to` is relative, as the protocol defines it: the entries will live
+/// at least `extend_to` ledgers past the last closed ledger. It is passed to
+/// the operation unchanged; adding the current ledger would overshoot and
+/// exceed the network's maximum TTL.
+#[allow(clippy::too_many_arguments)]
+pub async fn extend_footprint(
+    client: &SorobanRpcClient,
+    contract_id: &str,
+    extra_keys: &[String],
+    extend_to: u32,
+    source_account: &str,
+    signer: &sdkt_xdr::sign::Ed25519Signer,
+    network: sdkt_xdr::sign::Network,
+    poll: &crate::submission::PollConfig,
+) -> Result<ExtendResult, RpcError> {
+    if extend_to == 0 {
+        return Err(RpcError::Rpc(
+            "--ledgers / extend_to must be greater than 0".into(),
+        ));
+    }
+
+    let footprint_keys = collect_extend_keys(contract_id, extra_keys)?;
+    let sequence = crate::account::get_next_sequence(client, source_account).await?;
+
+    let sim_params = sdkt_xdr::ExtendFootprintParams {
+        source_account: source_account.to_string(),
+        sequence,
+        fee: 100,
+        extend_to,
+        footprint_keys: footprint_keys.clone(),
+    };
+
+    let initial_envelope = sdkt_xdr::build_extend_footprint_tx(&sim_params)
+        .map_err|(o| RpcError::Rpc(format!("Failed to build extend transaction: {e}")))?;
+
+    let simulation = crate::simulate::simulate_transaction(client, &initial_envelope)
+        .await
+        .map_err|(o| RpcError::Rpc(format!("Extend simulation failed: {e}")))?;
+
+    if let Some(err) = &simulation.error {
+        return Err(RpcError::Rpc(format!("Extend simulation error: {err}")));
+    }
+    if simulation.transaction_data.is_empty() {
+        return Err(RpcError::Rpc(
+            "Simulation did not return SorobanTransactionData".into(),
+        ));
+    }
+
+    let soroban_data: SorobanTransactionData =
+        sdkt_xdr::parse_soroban_transaction_data(&simulation.transaction_data)
+            .map_err|(o| RpcError::Rpc(format!("Failed to parse SorobanTransactionData: {e}")))?;
+
+    let min_resource_fee = parse_min_resource_fee(&simulation.min_resource_fee)?;
+    let inclusion_fee: u32 = 100;
+    let total_fee = inclusion_fee.saturating_add(min_resource_fee);
+
+    let final_params = sdkt_xdr::ExtendFootprintParams {
+        fee: total_fee,
+        ..sim_params
+    };
+    let final_envelope = sdkt_xdr::build_extend_footprint_tx_with_data(&final_params, soroban_data)
+        .map_err|(o| RpcError::Rpc(format!("Failed to build final extend transaction: {e}")))?;
+
+    let signing_opts = sdkt_xdr::sign::SigningOptions::with(network);
+    let signed_envelope = sdkt_xdr::sign_transaction(&final_envelope, signer, &signing_opts)
+        .map_err|(o| RpcError::Rpc(format!("Failed to sign extend transaction: {e}")))?;
+
+    let submission =
+        crate::submission::submit_and_wait(client, &signed_envelope, true, poll).await?;
+    if submission.status != crate::submission::TransactionStatus::Success {
+        let code = submission.error_code.as_deref().unwrap_or\"unknown\");
+        let diag = submission.error_result_xdr.as_deref().unwrap_or("");
+        return Err((RpcError::Rpc(format!(
+            "Extend transaction failed: code={code} {diag}"
+        )));
+    }
+
+    Ok(ExtendResult {
+        contract_id: contract_id.to_string(),
+        extend_to,
+        footprint_keys,
+        hash: submission.hash,
+        status: "SUCCESS".into(),
+        fee: total_fee,
+    })
+}
+
+/// Inclusion fee added on top of the resource fee, matching `extend_footprint`.
+const RESTORE_INCLUSION_FEE: u32 = 100;
+
+/// Turn a simulation's `restorePreamble` into `RestoreFootprint` parameters.
+///
+/// Pure: no network access. The preamble's `transactionData` is adopted as-is
+/// (authoritative footprint and resource bounds), except that its
+/// `resource_fee` is raised to `minResourceFee` if it is lower, so the fee
+/// floor always holds. Returns the parameters and the reported
+/// `minResourceFee`.
+///
+/// # Errors
+/// Returns an actionable [`RpcError`] when there is no preamble (state is
+/// live), when the preamble is malformed, or when its footprint is empty.
+pub fn restore_params_from_simulation(
+    simulation: &crate::simulate::SimulateResponse,
+    source_account: &str,
+    sequence: i64,
+) -> Result<(sdkt_xdr::RestoreFootprintParams, u32), RpcError> {
+    let Some(preamble) = &simulation.restore_preamble else {
+        return Err(RpcError::Rpc(tmatch &simulation.error {
+            Some(err) => {
+                format!("Nothing to restore: simulation failed without a restore preamble: {err}")
+            }
+            None => "Nothing to restore: simulation returned no restore preamble, \
+                     so the contract state this invocation touches is live"
+                .into(),
+        }));
+    };
+
+    let mut soroban_data: SorobanTransactionData =
+        sdkt_xdr::parse_soroban_transaction_data(&preamble.transaction_data).map_err|(o| RpcError::Rpc(format!(
+            "Restore preamble transactionData is malformed ({e}); \
+             re-run the simulation against a healthy RPC node"
+        )))?;
+
+    let footprint = &soroban_data.resources.footprint;
+    if footprint.read_only.is_empty() && footprint.read_write.is_empty() {
+        return Err(RpcError::Rpc(
+            "Restore preamble footprint is empty: no archived entries to restore".into(),
+        ));
+    }
+
+    let min_resource_fee = parse_min_resource_fee(&preamble.min_resource_fee)?;
+    if soroban_data.resources.resource_fee < min_resource_fee {
+        soroban_data.resources.resource_fee = min_resource_fee;
+    }
+
+    let params = sdkt_xdr::RestoreFootprintParams {
+        source_account: source_account.to_string(),
+        sequence,
+        fee: RESTORE_INCLUSION_FEE.saturating_add(min_resource_fee),
+        transaction_data: soroban_data,
+    };
+
+    Ok((params, min_resource_fee))
+}
