@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use serde_json::json;
 use std::fs;
 use std::net::TcpListener;
 use std::path::Path;
@@ -99,24 +100,16 @@ fn create_snapshot_file(path: &Path, contract_id: &str, entries: &[(&str, u32)])
                 "current_ttl": ttl,
                 "days_remaining": ttl / 17280,
                 "extension_cost_stroops": 0,
+                "value": serde_json::Value::Null,
             })
         })
         .collect();
 
-    create_snapshot_file_with_values(path, contract_id, &entry_objs);
-}
-
-fn create_snapshot_file_with_values(
-    path: &Path,
-    contract_id: &str,
-    entry_objs: &[serde_json::Value],
-) {
-
     let report = serde_json::json!({
         "contract_id": contract_id,
-        "total_entries": entry_objs.len(),
+        "total_entries": entries.len(),
         "instance_entries": 0,
-        "persistent_entries": entry_objs.len(),
+        "persistent_entries": entries.len(),
         "temporary_entries": 0,
         "other_entries": 0,
         "entries": entry_objs,
@@ -126,29 +119,48 @@ fn create_snapshot_file_with_values(
 }
 
 #[test]
-fn storage_diff_cli_reports_value_changed_delta() {
+fn storage_diff_cli_reports_value_changed_when_ttl_matches() {
     let dir = tempdir().unwrap();
     let old_path = dir.path().join("old.json");
     let new_path = dir.path().join("new.json");
 
-    let old_entry = serde_json::json!({
-        "key": "keyA==",
-        "class": "persistent",
-        "current_ttl": 20_000,
-        "days_remaining": 1,
-        "extension_cost_stroops": 0,
-        "value": "AAAAAQ==",
+    let old_value = sdkt_xdr::scval_to_base64(&stellar_xdr::ScVal::U32(100)).unwrap();
+    let new_value = sdkt_xdr::scval_to_base64(&stellar_xdr::ScVal::U32(0)).unwrap();
+
+    let old_report = json!({
+        "contract_id": CONTRACT,
+        "total_entries": 1,
+        "instance_entries": 0,
+        "persistent_entries": 1,
+        "temporary_entries": 0,
+        "other_entries": 0,
+        "entries": [{
+            "key": "keyA==",
+            "class": "persistent",
+            "current_ttl": 20_000,
+            "days_remaining": 1,
+            "extension_cost_stroops": 0,
+            "value": old_value,
+        }],
     });
-    let new_entry = serde_json::json!({
-        "key": "keyA==",
-        "class": "persistent",
-        "current_ttl": 20_000,
-        "days_remaining": 1,
-        "extension_cost_stroops": 0,
-        "value": "AAAAAg==",
+    let new_report = json!({
+        "contract_id": CONTRACT,
+        "total_entries": 1,
+        "instance_entries": 0,
+        "persistent_entries": 1,
+        "temporary_entries": 0,
+        "other_entries": 0,
+        "entries": [{
+            "key": "keyA==",
+            "class": "persistent",
+            "current_ttl": 20_000,
+            "days_remaining": 1,
+            "extension_cost_stroops": 0,
+            "value": new_value,
+        }],
     });
-    create_snapshot_file_with_values(&old_path, CONTRACT, &[old_entry]);
-    create_snapshot_file_with_values(&new_path, CONTRACT, &[new_entry]);
+    fs::write(&old_path, serde_json::to_string_pretty(&old_report).unwrap()).unwrap();
+    fs::write(&new_path, serde_json::to_string_pretty(&new_report).unwrap()).unwrap();
 
     let mut json_cmd = sdkt();
     json_cmd
@@ -161,22 +173,57 @@ fn storage_diff_cli_reports_value_changed_delta() {
     let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
     let entries = parsed["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0]["key"], "keyA==");
-    assert_eq!(entries[0]["value_changed"], true);
+    assert_eq!(entries[0]["delta"], "value_changed");
 
-    let mut pretty = sdkt();
-    pretty
+    let mut pretty_cmd = sdkt();
+    pretty_cmd
         .args(["storage", "diff", "--old"])
         .arg(&old_path)
         .arg("--new")
         .arg(&new_path);
-    let output = pretty.assert().success().get_output().stdout.clone();
-    let stdout = String::from_utf8(output).unwrap();
-    assert!(stdout.contains("value_changed"));
+    let pretty_out = pretty_cmd.assert().success().get_output().stdout.clone();
+    assert!(String::from_utf8(pretty_out).unwrap().contains("value_changed"));
 }
 
 #[test]
-fn storage_diff_cli_value_less_snapshot_parses() {
+fn storage_diff_cli_unchanged_when_value_and_ttl_match() {
+    let dir = tempdir().unwrap();
+    let old_path = dir.path().join("old.json");
+    let new_path = dir.path().join("new.json");
+
+    let value = sdkt_xdr::scval_to_base64(&stellar_xdr::ScVal::U32(42)).unwrap();
+    let report = json!({
+        "contract_id": CONTRACT,
+        "total_entries": 1,
+        "instance_entries": 0,
+        "persistent_entries": 1,
+        "temporary_entries": 0,
+        "other_entries": 0,
+        "entries": [{
+            "key": "keyA==",
+            "class": "persistent",
+            "current_ttl": 20_000,
+            "days_remaining": 1,
+            "extension_cost_stroops": 0,
+            "value": value,
+        }],
+    });
+    fs::write(&old_path, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+    fs::write(&new_path, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+
+    let mut cmd = sdkt();
+    cmd.args(["storage", "diff", "--old"])
+        .arg(&old_path)
+        .arg("--new")
+        .arg(&new_path)
+        .args(["--format", "json"]);
+    let output = cmd.assert().success().get_output().stdout.clone();
+    let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(parsed["unchanged"].as_u64().unwrap_or(0), 1);
+}
+
+#[test]
+fn storage_diff_cli_parses_legacy_snapshot_without_value_field() {
     let dir = tempdir().unwrap();
     let old_path = dir.path().join("old.json");
     let new_path = dir.path().join("new.json");
@@ -192,7 +239,7 @@ fn storage_diff_cli_value_less_snapshot_parses() {
         .args(["--format", "json"]);
     let output = cmd.assert().success().get_output().stdout.clone();
     let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(parsed["unchanged"], 1);
+    assert_eq!(parsed["unchanged"].as_u64().unwrap_or(0), 1);
 }
 
 #[test]
