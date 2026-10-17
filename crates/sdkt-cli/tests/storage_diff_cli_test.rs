@@ -10,6 +10,85 @@ fn sdkt() -> Command {
 
 const CONTRACT: &str = "CAE3U7JKESRWZHPEQ72DVNGOQ6WPA7HSPQZL5YV46NPCE4TMUPAGYMEC";
 
+#[test]
+fn abi_diff_labels_keys_without_changing_counts() {
+    use stellar_xdr::{
+        Limits, ScSpecEntry, ScSpecTypeDef, ScSpecUdtUnionCaseTupleV0, ScSpecUdtUnionCaseV0,
+        ScSpecUdtUnionV0, ScVal, WriteXdr,
+    };
+
+    let dir = tempdir().unwrap();
+    let wasm_path = dir.path().join("abi.wasm");
+    let union = ScSpecEntry::UdtUnionV0(ScSpecUdtUnionV0 {
+        doc: "".try_into().unwrap(),
+        lib: "test".try_into().unwrap(),
+        name: "DataKey".try_into().unwrap(),
+        cases: vec![ScSpecUdtUnionCaseV0::TupleV0(ScSpecUdtUnionCaseTupleV0 {
+            doc: "".try_into().unwrap(),
+            name: "Balance".try_into().unwrap(),
+            type_: vec![ScSpecTypeDef::U32].try_into().unwrap(),
+        })]
+        .try_into()
+        .unwrap(),
+    });
+    let mut section = vec!["contractspecv0".len() as u8];
+    section.extend_from_slice(b"contractspecv0");
+    section.extend_from_slice(&union.to_xdr(Limits::none()).unwrap());
+    let mut wasm = vec![0, 97, 115, 109, 1, 0, 0, 0, 0];
+    wasm.push(section.len() as u8);
+    wasm.extend_from_slice(&section);
+    fs::write(&wasm_path, wasm).unwrap();
+
+    let arg = sdkt_xdr::scval_to_base64(&ScVal::U32(7)).unwrap();
+    let key = sdkt_xdr::build_map_key("Balance", &[arg]).unwrap();
+    let raw = sdkt_xdr::encode_ledger_key(&sdkt_xdr::LedgerKeyParams::ContractDataEntry {
+        contract: CONTRACT.to_string(),
+        key,
+        durability: stellar_xdr::ContractDataDurability::Persistent,
+    })
+    .unwrap();
+    let old_path = dir.path().join("old.json");
+    let new_path = dir.path().join("new.json");
+    create_snapshot_file(&old_path, CONTRACT, &[(&raw, 50_000)]);
+    create_snapshot_file(&new_path, CONTRACT, &[(&raw, 3_000)]);
+
+    let run = |with_abi: bool| {
+        let mut cmd = sdkt();
+        cmd.args(["storage", "diff", "--old"])
+            .arg(&old_path)
+            .arg("--new")
+            .arg(&new_path)
+            .args(["--format", "json"]);
+        if with_abi {
+            cmd.arg("--abi").arg(&wasm_path);
+        }
+        let output = cmd.assert().success().get_output().stdout.clone();
+        serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+    };
+    let plain = run(false);
+    let labeled = run(true);
+    assert_eq!(plain["entries"][0]["key"], labeled["entries"][0]["key"]);
+    assert_eq!(
+        plain["entries"].as_array().unwrap().len(),
+        labeled["entries"].as_array().unwrap().len()
+    );
+    assert!(plain["entries"][0].get("label").is_none());
+    assert_eq!(labeled["entries"][0]["label"], "DataKey::Balance(u32)");
+
+    let mut pretty = sdkt();
+    pretty
+        .args(["storage", "diff", "--old"])
+        .arg(&old_path)
+        .arg("--new")
+        .arg(&new_path)
+        .arg("--abi")
+        .arg(&wasm_path);
+    let output = pretty.assert().success().get_output().stdout.clone();
+    assert!(String::from_utf8(output)
+        .unwrap()
+        .contains("label=DataKey::Balance(u32)"));
+}
+
 fn create_snapshot_file(path: &Path, contract_id: &str, entries: &[(&str, u32)]) {
     let entry_objs: Vec<serde_json::Value> = entries
         .iter()
@@ -24,17 +103,96 @@ fn create_snapshot_file(path: &Path, contract_id: &str, entries: &[(&str, u32)])
         })
         .collect();
 
+    create_snapshot_file_with_values(path, contract_id, &entry_objs);
+}
+
+fn create_snapshot_file_with_values(
+    path: &Path,
+    contract_id: &str,
+    entry_objs: &[serde_json::Value],
+) {
+
     let report = serde_json::json!({
         "contract_id": contract_id,
-        "total_entries": entries.len(),
+        "total_entries": entry_objs.len(),
         "instance_entries": 0,
-        "persistent_entries": entries.len(),
+        "persistent_entries": entry_objs.len(),
         "temporary_entries": 0,
         "other_entries": 0,
         "entries": entry_objs,
     });
 
     fs::write(path, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+}
+
+#[test]
+fn storage_diff_cli_reports_value_changed_delta() {
+    let dir = tempdir().unwrap();
+    let old_path = dir.path().join("old.json");
+    let new_path = dir.path().join("new.json");
+
+    let old_entries = vec![serde_json::json!({
+        "key": "keyA==",
+        "class": "persistent",
+        "current_ttl": 20_000,
+        "days_remaining": 1,
+        "extension_cost_stroops": 0,
+        "value": "AAAAAQ==",
+    })];
+    let new_entries = vec![serde_json::json!({
+        "key": "keyA==",
+        "class": "persistent",
+        "current_ttl": 20_000,
+        "days_remaining": 1,
+        "extension_cost_stroops": 0,
+        "value": "AAAAAg==",
+    })];
+    create_snapshot_file_with_values(&old_path, CONTRACT, &old_entries);
+    create_snapshot_file_with_values(&new_path, CONTRACT, &new_entries);
+
+    let mut json_cmd = sdkt();
+    json_cmd
+        .args(["storage", "diff", "--old"])
+        .arg(&old_path)
+        .arg("--new")
+        .arg(&new_path)
+        .args(["--format", "json"]);
+    let output = json_cmd.assert().success().get_output().stdout.clone();
+    let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let entries = parsed["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["key"], "keyA==");
+    assert_eq!(entries[0]["value_changed"], true);
+
+    let mut pretty = sdkt();
+    pretty
+        .args(["storage", "diff", "--old"])
+        .arg(&old_path)
+        .arg("--new")
+        .arg(&new_path);
+    let output = pretty.assert().success().get_output().stdout.clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(stdout.contains("value_changed"));
+}
+
+#[test]
+fn storage_diff_cli_value_less_snapshot_still_parses() {
+    let dir = tempdir().unwrap();
+    let old_path = dir.path().join("old.json");
+    let new_path = dir.path().join("new.json");
+
+    create_snapshot_file(&old_path, CONTRACT, &[("keyA==", 20_000)]);
+    create_snapshot_file(&new_path, CONTRACT, &[("keyA==", 20_000)]);
+
+    let mut cmd = sdkt();
+    cmd.args(["storage", "diff", "--old"])
+        .arg(&old_path)
+        .arg("--new")
+        .arg(&new_path)
+        .args(["--format", "json"]);
+    let output = cmd.assert().success().get_output().stdout.clone();
+    let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(parsed["unchanged"], 1);
 }
 
 #[test]
